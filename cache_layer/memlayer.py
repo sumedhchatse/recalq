@@ -1567,9 +1567,13 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
 # ── CLI ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import readline  # noqa: F401 — importing it wires input() up with arrow-key history
+    from plugins import load_plugins
 
-    _CLI_WORDS = ["quit", "stats", "cache", "providers", "status", "add", "project",
-                  "model", "doc", "image"]
+    _plugins_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins")
+    _plugin_api = load_plugins(_plugins_dir)
+
+    _CLI_WORDS = ["quit", "stats", "cache", "providers", "status", "add", "project", "plugins",
+                  "model", "doc", "image"] + list(_plugin_api.commands.keys())
 
     def _cli_completer(text, state):
         buf = readline.get_line_buffer()
@@ -1590,9 +1594,12 @@ if __name__ == "__main__":
     readline.parse_and_bind("tab: complete")
 
     print(f"\n🧠 MemLayer CLI — 📁 {os.getcwd()}")
-    print("   commands: quit | stats | cache | providers | status | add | project | "
+    print("   commands: quit | stats | cache | providers | status | add | project | plugins | "
           "model <name> | doc <path> | image <path> [question]")
-    print("   (Tab completes commands/models/paths, ↑/↓ for history)\n")
+    print("   (Tab completes commands/models/paths, ↑/↓ for history)")
+    if _plugin_api.loaded:
+        print(f"   plugins loaded: {', '.join(_plugin_api.loaded)}")
+    print()
     model = default_model()
     recent_doc_id = None
     _project_scanned = False
@@ -1649,6 +1656,15 @@ if __name__ == "__main__":
                 for s in unconfig:
                     print(_line(s))
             print()
+            continue
+        if user_input == "plugins":
+            if not _plugin_api.loaded:
+                print(f"\n  none loaded (drop a .py file in {_plugins_dir}/ — see plugins/README.md)\n")
+            else:
+                print(f"\n  loaded: {', '.join(_plugin_api.loaded)}")
+                for cname, (_handler, chelp) in _plugin_api.commands.items():
+                    print(f"    {cname:12s} {chelp}")
+                print()
             continue
         if user_input in ("add", "add provider"):
             try:
@@ -1739,6 +1755,16 @@ if __name__ == "__main__":
             history.append({"role": "assistant", "content": result["answer"]})
             history[:] = history[-12:]
             continue
+        _first_word = user_input.split(maxsplit=1)[0]
+        if _first_word in _plugin_api.commands:
+            _handler, _ = _plugin_api.commands[_first_word]
+            _arg = user_input[len(_first_word):].strip()
+            try:
+                _handler(_arg)
+            except Exception as e:
+                print(f"  plugin command '{_first_word}' failed: {e}")
+            print()
+            continue
         if not _project_scanned and any(t in user_input.lower() for t in _PROJECT_TRIGGERS):
             cwd = os.getcwd()
             print(f"\n📁 (auto) scanning {cwd} first, so this isn't answered blind...")
@@ -1755,8 +1781,10 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"  (project scan failed, answering without it: {e})")
 
-        result = ask(user_input, model, history=history, recent_doc_id=recent_doc_id,
+        _query = _plugin_api.run_before(user_input)
+        result = ask(_query, model, history=history, recent_doc_id=recent_doc_id,
                      has_attachments=bool(recent_doc_id))
+        result["answer"] = _plugin_api.run_after(_query, result["answer"])
         src = result["source"]
         if src == "cache":
             print(f"\n⚡ CACHE HIT | sim={result['similarity']} | hits={result['hits']}")
