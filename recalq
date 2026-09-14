@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""
+recalq — terminal entrypoint for the MemLayer engine (semantic cache +
+memory + org-knowledge, any LLM provider or local model via litellm).
+No web UI, no license check, no proxy server: bring your own API key
+(or point at a local Ollama model) and go.
+"""
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+os.execv(sys.executable, [sys.executable, os.path.join(_here, "cache_layer", "memlayer.py"), *sys.argv[1:]])

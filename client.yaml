@@ -1,0 +1,151 @@
+# ════════════════════════════════════════════════════════════
+# Provider registry — edit this file to add/change LLM providers,
+# models, or API keys. No proxy to restart: the CLI reads this file
+# directly (cache_layer/providers.py) via litellm, in-process.
+# You are not limited to what's listed here — the CLI also accepts
+# any raw litellm model string on the fly, e.g. "ollama/llama3.1".
+# ════════════════════════════════════════════════════════════
+
+# ── LLM Providers ─────────────────────────────────────────────
+# Add as many as you want. "key" is the short name used in the CLI
+# (e.g. "gemini", "claude"). "fallback_to" is which provider to
+# silently retry if this one fails (out of credits, rate limited,
+# network issue, missing API key).
+#
+# Supported provider types: gemini, anthropic, openai, azure, groq,
+# mistral, cohere, ollama (local), bedrock — anything LiteLLM supports.
+
+providers:
+
+  gemini:
+    enabled: true
+    provider_type: gemini
+    model: gemini-3.1-flash-lite
+    api_key_env: GEMINI_API_KEY
+    fallback_to: claude
+    display_name: "Gemini"
+    cost_per_1k_tokens: 0.000075
+
+  claude:
+    enabled: true
+    provider_type: anthropic
+    model: claude-sonnet-4-6
+    api_key_env: ANTHROPIC_API_KEY
+    fallback_to: gemini
+    display_name: "Claude"
+    cost_per_1k_tokens: 0.003
+
+  groq:
+    enabled: true
+    provider_type: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    fallback_to: gemini
+    display_name: "Groq (fast)"
+    cost_per_1k_tokens: 0.0
+
+  N_deepseek:
+    enabled: true
+    provider_type: openai     # DeepSeek uses OpenAI-compatible API
+    model: "deepseek-ai/deepseek-v4-flash"
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: "https://integrate.api.nvidia.com/v1"
+    fallback_to: gemini
+    display_name: "DeepSeek-v4-flash"
+    cost_per_1k_tokens: 0.00014
+ 
+  nvidia_NEMO_3:
+    enabled: true
+    provider_type: openai     # NVIDIA uses OpenAI-compatible API
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    fallback_to: gemini
+    display_name: "NVIDIA Nemotron-3-ultra"
+    cost_per_1k_tokens: 0.0
+
+  N_kimi-k2:
+    enabled: true
+    provider_type: openai
+    model: "moonshotai/kimi-k2.6"
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    fallback_to: groq
+    display_name: "KIMI K2.6"
+    cost_per_1k_tokens: 0.0
+
+  kimi-k3:
+    enabled: true
+    provider_type: openai
+    model: "kimi-k3"
+    api_key_env: KIMI_K3_API_KEY
+    api_base: https://api.moonshot.ai/v1
+    fallback_to: gemini
+    display_name: "KIMI K3"
+    cost_per_1k_tokens: 0.0
+
+  nvidia_nemotron-3-super:
+    enabled: true
+    provider_type: openai     # NVIDIA uses OpenAI-compatible API
+    model: "nvidia/nemotron-3-super-120b-a12b"
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    fallback_to: gemini
+    display_name: "nemotron-3-super"
+    cost_per_1k_tokens: 0.0
+
+  nvidia_openai_gpt:
+    enabled: true
+    provider_type: openai     # NVIDIA uses OpenAI-compatible API
+    model: "openai/gpt-oss-120b"
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    fallback_to: gemini
+    display_name: "openai_gpt_oss"
+    cost_per_1k_tokens: 0.0
+
+  nvidia_meta:
+    enabled: true
+    provider_type: openai  
+    model: "meta/llama-3.3-70b-instruct"
+    api_key_env: NVIDIA_MODEL_API_KEY
+    api_base: https://integrate.api.nvidia.com/v1
+    fallback_to: groq
+    display_name: "meta_llama-3.3-70b-instruct"
+    cost_per_1k_tokens: 0.0
+
+
+  # ── Example: add OpenAI later just by uncommenting ──────────
+  # openai:
+  #   enabled: false
+  #   provider_type: openai
+  #   model: gpt-4o
+  #   api_key_env: OPENAI_API_KEY
+  #   fallback_to: gemini
+  #   display_name: "GPT-4o"
+  #   cost_per_1k_tokens: 0.0025
+
+  # ── Example: add a local Ollama model (zero cost, fully offline) ──
+  # llama:
+  #   enabled: false
+  #   provider_type: ollama
+  #   model: llama3.1
+  #   api_base: http://localhost:11434
+  #   display_name: "Llama 3.1 (local)"
+  #   cost_per_1k_tokens: 0.0
+
+  gemini_flash:
+    enabled: true
+    provider_type: gemini
+    model: "gemini-flash-latest"
+    api_key_env: GEMINI_FLASH_API_KEY
+    fallback_to: gemini
+    display_name: "Gemini Flash (latest)"
+    cost_per_1k_tokens: 0.0
+
+# ── Which provider is the default choice ────────────────────────
+auto_provider: groq
+
+# Cache TTL / similarity threshold / Redis connection are set via
+# environment variables (.env) — see CACHE_TTL, SIMILARITY_CUTOFF,
+# REDIS_HOST, REDIS_PORT, REDIS_PASSWORD.
