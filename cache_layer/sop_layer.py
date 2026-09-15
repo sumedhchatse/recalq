@@ -185,7 +185,7 @@ def try_sop_answer(query, model, user=None, query_had_pii=False, role="user",
 
         # 5. Stats + audit
         stats["llm_calls"] = stats.get("llm_calls", 0) + 1
-        save_stats_fn(stats)
+        save_stats_fn(stats, SOP_NAMESPACE)
         try:
             audit_mod.record(r, user=user, query=query, model=model,
                              source="sop", namespace=SOP_NAMESPACE,

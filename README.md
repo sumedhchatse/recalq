@@ -106,6 +106,15 @@ kill $(cat ~/memlayer/.telegram.pid)
 claude mcp add recalq -- python3 ~/memlayer/recalq_mcp.py
 ```
 
+### Slack / Teams — opt-in, not yet built
+
+`slack_bot.py` and `teams_bot.py` are scaffolds: config-gated the same way
+Telegram is (unset the required `.env` vars and they refuse to start), but
+the actual connector logic isn't implemented yet. Run either one for setup
+steps and what's needed to finish it — Slack's docstring explains why it's
+a smaller task (Socket Mode, one new dependency) than Teams' (needs a
+public HTTPS endpoint + Azure Bot Service registration).
+
 ## 4. Status checks
 
 | What | Command |

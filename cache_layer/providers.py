@@ -43,13 +43,13 @@ _CLIENT_YAML = os.path.join(os.path.dirname(os.path.dirname(__file__)), "client.
 
 def _load_providers():
     if not os.path.exists(_CLIENT_YAML):
-        return {}, None
+        return {}, None, None
     with open(_CLIENT_YAML) as f:
         cfg = yaml.safe_load(f) or {}
-    return cfg.get("providers", {}) or {}, cfg.get("auto_provider")
+    return cfg.get("providers", {}) or {}, cfg.get("auto_provider"), cfg.get("architect_provider")
 
 
-_PROVIDERS, _AUTO = _load_providers()
+_PROVIDERS, _AUTO, _ARCHITECT = _load_providers()
 
 
 def default_model() -> str:
@@ -57,6 +57,15 @@ def default_model() -> str:
     if _AUTO in _PROVIDERS and _PROVIDERS[_AUTO].get("enabled"):
         return _AUTO
     return next((k for k, p in _PROVIDERS.items() if p.get("enabled")), "gemini")
+
+
+def architect_provider() -> str:
+    """Alias to use for the /agent planning pass (see client.yaml's
+    `architect_provider`), or None if unset/disabled — architect mode is
+    opt-in, off by default so it never silently adds cost."""
+    if _ARCHITECT and _ARCHITECT in _PROVIDERS and _PROVIDERS[_ARCHITECT].get("enabled"):
+        return _ARCHITECT
+    return None
 
 
 def provider_registry() -> dict:
@@ -136,7 +145,7 @@ def add_provider(alias: str, provider_type: str, model: str, api_key_env: str = 
                  cost_per_1k_tokens: float = 0.0):
     """Append a new provider block to client.yaml and make it usable
     immediately in this process (no restart) by reloading the registry."""
-    global _PROVIDERS, _AUTO
+    global _PROVIDERS, _AUTO, _ARCHITECT
     if alias in _PROVIDERS:
         raise ValueError(f"'{alias}' already exists in client.yaml")
 
@@ -160,7 +169,7 @@ def add_provider(alias: str, provider_type: str, model: str, api_key_env: str = 
     with open(_CLIENT_YAML, "w") as f:
         f.write(content)
 
-    _PROVIDERS, _AUTO = _load_providers()
+    _PROVIDERS, _AUTO, _ARCHITECT = _load_providers()
 
 
 def save_api_key(env_var: str, value: str):
@@ -225,20 +234,23 @@ def _call_with_timeout(fn, _timeout, *args, **kwargs):
     return box["value"]
 
 
-def chat_completion(alias_or_model: str, messages: list, max_tokens: int = 800, _seen=None):
+def chat_completion(alias_or_model: str, messages: list, max_tokens: int = 800, _seen=None,
+                     tools: list = None):
     """Drop-in for the old proxy's `client.chat.completions.create(...)`.
-    Same response shape — litellm mirrors the OpenAI SDK's response object."""
+    Same response shape — litellm mirrors the OpenAI SDK's response object.
+    `tools`, if given, is an OpenAI-style function-calling tool list — not
+    every provider/model supports it (litellm raises if the target doesn't)."""
     _seen = (_seen or set()) | {alias_or_model}
     model, api_key, api_base, fallback = _resolve(alias_or_model)
     can_fallback = fallback and fallback not in _seen  # fallback chains can cycle (a->b->a)
+    kwargs = dict(model=model, messages=messages, max_tokens=max_tokens,
+                  api_key=api_key, api_base=api_base, timeout=REQUEST_TIMEOUT)
+    if tools:
+        kwargs["tools"] = tools
     try:
-        return _call_with_timeout(
-            litellm.completion, REQUEST_TIMEOUT,
-            model=model, messages=messages, max_tokens=max_tokens,
-            api_key=api_key, api_base=api_base, timeout=REQUEST_TIMEOUT,
-        )
+        return _call_with_timeout(litellm.completion, REQUEST_TIMEOUT, **kwargs)
     except Exception as e:
         if can_fallback:
             log.warning(f"provider '{alias_or_model}' failed ({e}) — falling back to '{fallback}'")
-            return chat_completion(fallback, messages, max_tokens, _seen)
+            return chat_completion(fallback, messages, max_tokens, _seen, tools=tools)
         raise

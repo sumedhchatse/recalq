@@ -3,7 +3,7 @@ MemLayer - Universal Compositional Memory Engine
 Provider-agnostic AI shared memory middle layer
 All data stays local on your machine
 """
-import os, json, hashlib, time, re, logging
+import os, sys, json, hashlib, time, re, logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -20,7 +20,8 @@ from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from guardrails import check_query, check_answer
 from providers import (chat_completion, default_model, list_providers,
-                       provider_status, add_provider, save_api_key)
+                       provider_status, add_provider, save_api_key, architect_provider)
+import agent
 import audit
 import sop_layer
 
@@ -175,6 +176,21 @@ def _ns(namespace: str = None) -> str:
         return DEFAULT_NAMESPACE
     return namespace.strip().lower().replace(" ", "-")
 
+
+def project_namespace(root: str) -> str:
+    """Stable namespace for a project directory — cache/docs/stats scoped
+    to the actual codebase path, so two unrelated projects (or a stray
+    document ingested somewhere else entirely) never leak into each
+    other's answers. Deterministic: the same path always resolves to the
+    same namespace across processes/restarts, no state file needed.
+    Demonstrated need: asking "how can we improve this project?" with the
+    old fixed DEFAULT_NAMESPACE returned content from an unrelated invoice
+    PDF ingested in a different session — every project shared one bucket."""
+    real = os.path.realpath(root)
+    base = re.sub(r"[^a-z0-9]+", "-", os.path.basename(real.rstrip(os.sep)).lower()).strip("-") or "root"
+    digest = hashlib.sha256(real.encode()).hexdigest()[:8]
+    return f"project-{base}-{digest}"
+
 # ── Cache helpers ────────────────────────────────────────────
 def _cache_key(entry_id: str, namespace: str = None) -> str:
     return f"{CACHE_PREFIX}{_ns(namespace)}:{entry_id}"
@@ -191,6 +207,31 @@ def get_stats(namespace: str = None) -> dict:
         return json.loads(raw)
     return {"total_queries":0,"cache_hits":0,"tokens_saved_est":0,"llm_calls":0}
 
+# ── Session/conversation persistence ────────────────────────────
+# The cache (above) already survives a restart — this does the same for
+# the conversational turn-by-turn context (needed for a follow-up like "do
+# it" to know what "it" is), scoped by the same namespace as everything
+# else so a project's own history never mixes with another's.
+HISTORY_MAX_TURNS = 12  # 6 exchanges — same cap already used ad hoc everywhere
+
+def _history_key(namespace: str = None) -> str:
+    return f"{CACHE_PREFIX}{_ns(namespace)}:__history__"
+
+def save_history(history: list, namespace: str = None):
+    r.set(_history_key(namespace), json.dumps(history[-HISTORY_MAX_TURNS:]), ex=CACHE_TTL_SECS)
+
+def load_history(namespace: str = None) -> list:
+    raw = r.get(_history_key(namespace))
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except Exception:
+        return []
+
+def clear_history(namespace: str = None):
+    r.delete(_history_key(namespace))
+
 def list_cache_entries(namespace: str = None, all_namespaces: bool = False) -> list:
     """
     namespace=None        -> uses DEFAULT_NAMESPACE
@@ -204,7 +245,7 @@ def list_cache_entries(namespace: str = None, all_namespaces: bool = False) -> l
     keys = r.keys(pattern)
     entries = []
     for k in keys:
-        if "__meta__" in k or ":exact:" in k or "__audit__" in k:
+        if "__meta__" in k or ":exact:" in k or "__audit__" in k or "__history__" in k:
             continue
         try:
             raw = r.get(k)
@@ -250,7 +291,7 @@ def _shares_commons(namespace):
         return False
     return not any(ns.startswith(pfx) for pfx in _NO_COMMONS_PREFIXES)
 
-def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0, namespace: str = None, query_had_pii: bool = False):
+def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0, namespace: str = None, query_had_pii: bool = False, share_commons: bool = True):
     # Never cache a query that has no meaning without its conversation —
     # the identical string from a different conversation would hit it at 1.0.
     if is_context_dependent(query):
@@ -283,10 +324,13 @@ def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0
     log.info(f"Cached [{_ns(namespace)}]: '{query[:60]}'")
     register_exact_match(query, entry_id, namespace)
 
-    # Also save to shared commons cache (org-wide reuse), unless this
-    # query originally contained PII (even though it's now redacted,
-    # we keep PII-originated queries namespace-private as a precaution)
-    if _shares_commons(namespace) and not query_had_pii:
+    # Also save to shared commons cache (org-wide reuse), unless this query
+    # originally contained PII (kept namespace-private as a precaution even
+    # redacted), or share_commons=False — set by callers whose answer is
+    # grounded in one project's actual files (agent.answer()) and would
+    # otherwise leak that project's specifics to every other project/user
+    # sharing the commons pool.
+    if _shares_commons(namespace) and not query_had_pii and share_commons:
         commons_key = _cache_key(entry_id, "commons")
         r.set(commons_key, json.dumps(entry), ex=CACHE_TTL_SECS)
         register_exact_match(query, entry_id, "commons")
@@ -1018,7 +1062,19 @@ CONTEXT_DEPENDENT_PREFIXES = [
     # "and in Azure" after "...in AWS" — 3 words, no anaphora, so neither the
     # length rule nor the anaphora rule catches it.
     "and in", "and on", "and for", "and with", "what about in", "same for",
-    "more detail", "can you", "please explain", "expand on"
+    "more detail", "can you", "please explain", "expand on",
+    # Meta-conversational: asking about THIS conversation's own content, not
+    # general knowledge — same poisoning pattern as the anaphora case below
+    # (a later, unrelated conversation asking the identical phrase gets
+    # served an answer about someone else's chat), just without an anaphora
+    # pronoun to catch it. Live-demonstrated: a fresh Telegram chat asking
+    # "what did I just ask you about?" got told about a different project's
+    # file entirely, from a CLI session that happened to cache that exact
+    # phrase and share it to commons.
+    "what did i just ask", "what did i ask", "what did we discuss",
+    "what did we talk about", "what have i told you", "what have i asked",
+    "what was i asking", "what did i say", "what's my name", "what is my name",
+    "who am i", "do you remember what i", "do you remember my",
 ]
 def is_context_dependent(query: str) -> bool:
     """Returns True if query relies on previous conversation context."""
@@ -1319,21 +1375,21 @@ def ask_image(image_bytes: bytes, mime_type: str, question: str, model: str = No
         return {"answer": f"Error: {e}", "source": "error", "cached": False}
 
 
-def ask(query: str, model: str = "gemini", history: list = None, namespace: str = None, user: str = None, recent_doc_id: str = None, has_attachments: bool = False, role: str = "user", knowledge_grant: list = None) -> dict:
+def ask(query: str, model: str = "gemini", history: list = None, namespace: str = None, user: str = None, recent_doc_id: str = None, has_attachments: bool = False, role: str = "user", knowledge_grant: list = None, root: str = None, on_explore: callable = None) -> dict:
     _audit_start = time.time()
     # Resolve 'auto' to the real lowest-cost provider so the rest of the
     # app (dashboard, audit, response) reports the ACTUAL model used.
     if model == "auto":
         model = _resolve_auto_provider()
     _audit_original_query = query
-    stats = get_stats()
+    stats = get_stats(namespace)
     stats["total_queries"] += 1
 
     # Step -1 — guardrails check BEFORE anything else touches this query
     guard = check_query(query, mode="redact")
     if guard["action"] == "block":
         log.warning(f"BLOCKED by guardrails: '{query[:50]}'")
-        _save_stats(stats)
+        _save_stats(stats, namespace)
         audit.record(r, user=user, query="[BLOCKED QUERY]", model=model,
                      source="guardrails", namespace=namespace, blocked=True,
                      pii_types=[f["type"] for f in guard.get("findings", [])],
@@ -1366,7 +1422,7 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
         est_saved = len(query.split()) * 4 + 500
         stats["cache_hits"]       += 1
         stats["tokens_saved_est"] += est_saved
-        _save_stats(stats)
+        _save_stats(stats, namespace)
         log.info(f"EXACT CACHE HIT | saved~{est_saved}")
         audit.record(r, user=user, query=query, model="cache",
                      source="cache", namespace=namespace, tokens_saved=est_saved,
@@ -1390,7 +1446,7 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
         est_saved = len(query.split()) * 4 + 500
         stats["cache_hits"]       += 1
         stats["tokens_saved_est"] += est_saved
-        _save_stats(stats)
+        _save_stats(stats, namespace)
         log.info(f"CACHE HIT | score={score:.3f} | saved~{est_saved}")
         audit.record(r, user=user, query=query, model="cache",
                      source="cache", namespace=namespace, tokens_saved=est_saved,
@@ -1428,7 +1484,16 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
     try:
         import documents as _docs_mod
         _ql = query.lower()
-        _is_doc_cmd = any(kw in _ql for kw in [
+        # "this project"/"this document"/etc. only mean something when a doc
+        # was actually attached THIS session (recent_doc_id set) — without
+        # that, there's no "this" to refer to, and blindly trusting the
+        # phrase means searching across every unrelated document anyone has
+        # ever ingested into the shared namespace (a resume, a recipe, a
+        # random invoice...) and confidently answering from whichever one
+        # happens to score highest. Demonstrated live: "how can we improve
+        # this project?" with nothing attached returned content from an
+        # unrelated proforma invoice PDF ingested in a prior session.
+        _is_doc_cmd = has_attachments and any(kw in _ql for kw in [
             "summarize", "summarise", "review", "what's in", "whats in",
             "what is in", "key points", "tl;dr", "overview of", "explain this",
             "explain the document", "this document", "this file", "the file",
@@ -1464,6 +1529,8 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
                 # Trust explicit commands; else require not-dead-end.
                 if _dr.get("chunks_used",0) > 0 and (_is_doc_cmd or not _dead):
                     _dr["source"] = "documents"
+                    stats["llm_calls"] += 1
+                    _save_stats(stats, namespace)
                     return _dr
     except Exception as _e:
         log.warning(f"Document layer skipped: {_e}")
@@ -1492,7 +1559,7 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
     if intent in COMPOSITIONAL_INTENTS and len(concepts) >= 2 and _has_rel_kw:
         log.info(f"ROUTING TO UNIVERSAL | intent={intent} | concepts={len(concepts)} | rel_kw=yes")
         stats["llm_calls"] += 1
-        _save_stats(stats)
+        _save_stats(stats, namespace)
         return ask_universal(query, model, history, namespace, query_had_pii, user, intent)
 
     # Step 3 — direct LLM call
@@ -1521,29 +1588,31 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
         messages.extend(_trim_history_for_llm(history, query))
         messages.append({"role": "user", "content": query})
 
-        response = chat_completion(
-            model,
-            messages=messages,
-            max_tokens=800
-        )
-        answer     = response.choices[0].message.content
-        model_used = response.model
-        tokens_in  = getattr(response.usage, "prompt_tokens",  0)
-        tokens_out = getattr(response.usage, "completion_tokens", 0)
-        total_toks = tokens_in + tokens_out
+        # Read-only agent tools (list_dir/read_file) ride along on every
+        # direct-LLM turn — the model decides per question whether it needs
+        # to look at the actual project, same as Claude Code/Cursor, instead
+        # of a keyword list pre-deciding for it. Write/shell stay behind the
+        # explicit /agent path and its own trigger phrases.
+        _agent_result = agent.answer(messages, model, root=root or os.getcwd(), on_step=on_explore,
+                                     embedder=embedder)
+        answer     = _agent_result["answer"]
+        model_used = _agent_result["model"]
+        total_toks = _agent_result["tokens_used"]
 
         # Only cache self-contained queries
         # Context-dependent queries (e.g. "give me step by step")
         # are useless to cache — they mean nothing without prior context
         if not is_context_dependent(_cache_query):
-            save_to_cache(_cache_query, answer, model_used, total_toks, namespace, query_had_pii)
-            log.info(f"Cached new entry: '{query[:50]}'")
+            save_to_cache(_cache_query, answer, model_used, total_toks, namespace, query_had_pii,
+                         share_commons=not _agent_result.get("grounded"))
+            log.info(f"Cached new entry: '{query[:50]}'"
+                     + (" (project-grounded, not shared to commons)" if _agent_result.get("grounded") else ""))
         else:
             log.info(f"Context-dependent — skipping cache: '{query[:50]}'")
 
         stats["llm_calls"]        += 1
         stats["tokens_saved_est"] += 0
-        _save_stats(stats)
+        _save_stats(stats, namespace)
 
         audit.record(r, user=user, query=query, model=model_used,
                      source=_normalize_source(model_used), namespace=namespace, tokens_used=total_toks,
@@ -1561,25 +1630,58 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
     except Exception as e:
         log.error(f"Direct LLM failed: {e}")
         stats["llm_calls"] += 1
-        _save_stats(stats)
+        _save_stats(stats, namespace)
         return {"answer": f"Error: {str(e)}", "source": "error", "cached": False}
+
+# Phrase-sniffing for "this ask wants the agent to actually touch files"
+# (find/fix a bug, add a feature, ...) vs. a plain question — shared by
+# every connector (CLI, Telegram, ...), not just the CLI's REPL. Keyword
+# match, not LLM classification: zero extra cost/latency per query,
+# consistent with how Recalq keeps every turn cheap. Misses some phrasing
+# by design — say /agent explicitly for anything this doesn't catch.
+# "do it"-style follow-ups are included even though they're generic/vague:
+# a false positive here just routes to /agent, which is confirmation-gated
+# on every write anyway (worst case it explores and asks to confirm a
+# no-op); a false negative sends an action request to the read-only path,
+# which can only describe what it would do — worse, it was observed once
+# hallucinating that it HAD made changes it had no tool to make. Biasing
+# toward /agent is the safe direction here.
+AGENT_TRIGGERS = ("find the bug", "find a bug", "fix the bug", "fix a bug", "fix this bug",
+                  "there's a bug", "there is a bug", "add a feature", "add a new feature",
+                  "implement a feature", "add an add-on", "add addon", "create a file",
+                  "write a function", "refactor the", "add a new", "build a new",
+                  "make this change", "modify the code", "update the code",
+                  "do it", "do that", "apply that", "apply it", "implement that",
+                  "make it so", "just do it", "go ahead and do it")
+
 
 # ── CLI ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import readline  # noqa: F401 — importing it wires input() up with arrow-key history
     from plugins import load_plugins
+    import agent as _agent
 
     _plugins_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugins")
     _plugin_api = load_plugins(_plugins_dir)
 
-    _CLI_WORDS = ["quit", "stats", "cache", "providers", "status", "add", "project", "plugins",
-                  "model", "doc", "image"] + list(_plugin_api.commands.keys())
+    # Commands are slash-prefixed so a real question ("what's the status of
+    # my order?") can never be mistaken for a built-in command.
+    _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
+                  "/plugins", "/model", "/doc", "/image", "/agent", "/reset"] + [
+                  f"/{c}" for c in _plugin_api.commands.keys()]
+
+    _TTY = sys.stdout.isatty()
+
+    def _c(code, text):
+        return f"\033[{code}m{text}\033[0m" if _TTY else text
+
+    _RULE = _c("2", "─" * 60)
 
     def _cli_completer(text, state):
         buf = readline.get_line_buffer()
-        if buf.startswith("model "):
+        if buf.startswith("/model "):
             matches = [a for a, _, _ in list_providers() if a.startswith(text)]
-        elif buf.startswith("doc ") or buf.startswith("image "):
+        elif buf.startswith("/doc ") or buf.startswith("/image "):
             import glob
             matches = glob.glob(text + "*")
         else:
@@ -1593,47 +1695,93 @@ if __name__ == "__main__":
     readline.set_completer(_cli_completer)
     readline.parse_and_bind("tab: complete")
 
-    print(f"\n🧠 MemLayer CLI — 📁 {os.getcwd()}")
-    print("   commands: quit | stats | cache | providers | status | add | project | plugins | "
-          "model <name> | doc <path> | image <path> [question]")
-    print("   (Tab completes commands/models/paths, ↑/↓ for history)")
+    _cli_namespace = project_namespace(os.getcwd())
+
+    print()
+    print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
+    print(_RULE)
+    print(_c("2", "  /quit /stats /cache /providers /status /add /project /plugins /reset "
+                   "/model <name> /doc <path> /image <path> [q] /agent <task>"))
+    print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
+    print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
     if _plugin_api.loaded:
-        print(f"   plugins loaded: {', '.join(_plugin_api.loaded)}")
+        print(_c("2", f"  plugins loaded: {', '.join(_plugin_api.loaded)}"))
+    print(_RULE)
     print()
     model = default_model()
+
+    def _run_agent_and_print(task):
+        print()
+        print(_c("2", f"🤖 agent working in {os.getcwd()} ..."))
+        def _on_step(name, args):
+            if name == "update_plan":
+                print(_c("36", "  📋 plan:"))
+                for s in args.get("steps", []):
+                    mark = {"done": "✓", "in_progress": "→"}.get(s.get("status"), "·")
+                    print(_c("36", f"     {mark} {s.get('task','')}"))
+                return
+            preview = args.get("path") or args.get("command") or args.get("query") or args.get("pattern") or args.get("url", "")
+            print(_c("33", f"  → {name} {preview}"))
+        answer = _agent.run(task, model, root=os.getcwd(), on_step=_on_step, embedder=embedder,
+                            architect_model=architect_provider(), history=history)
+        print()
+        print(f"{_c('1;32', 'Recalq')} › {answer}")
+        print(_RULE)
+        print()
+        history.append({"role": "user", "content": task})
+        history.append({"role": "assistant", "content": answer})
+        _persist_history()
+
     recent_doc_id = None
     _project_scanned = False
-    history = []  # rolling chat turns, so follow-ups ("what is THIS for?") have context
+    # Resumed from Redis (same namespace as cache/docs) rather than starting
+    # blank each run — a follow-up like "do it" still means something even
+    # in a brand-new `./recalq` process, as long as you're in the same project.
+    history = load_history(_cli_namespace)
+    if history:
+        print(_c("2", f"  resumed previous conversation ({len(history)//2} exchanges) — /reset to start fresh"))
+        print()
+
+    def _persist_history():
+        history[:] = history[-HISTORY_MAX_TURNS:]
+        save_history(history, _cli_namespace)
     _PROJECT_TRIGGERS = ("analyze this project", "analyse this project", "analyze the project",
                          "explain this project", "explain this codebase", "explain this repo",
                          "what does this project do", "what is this project", "summarize this project",
                          "summarize this repo", "summarize this codebase")
     while True:
         try:
-            user_input = input(f"[{model}] You: ").strip()
+            user_input = input(f"{_c('1;36', 'You')} {_c('2', f'[{model}]')} › ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nBye.")
             break
-        if not user_input:        continue
-        if user_input == "quit":  break
-        if user_input == "stats":
-            s = get_stats()
+        if not user_input:         continue
+        if user_input == "/quit":  break
+        if user_input == "/stats":
+            s = get_stats(_cli_namespace)
             print(f"\n📊 queries={s['total_queries']} hits={s['cache_hits']} "
                   f"saved~{s['tokens_saved_est']} llm_calls={s['llm_calls']}\n")
             continue
-        if user_input == "cache":
-            for e in list_cache_entries()[:10]:
+        if user_input == "/cache":
+            for e in list_cache_entries(_cli_namespace)[:10]:
                 print(f"  [{e.get('hits',0)} hits] {e['query'][:70]}")
             continue
-        if user_input == "providers":
+        if user_input == "/reset":
+            history.clear()
+            clear_history(_cli_namespace)
+            recent_doc_id = None
+            _project_scanned = False
+            print("  conversation and attached-doc context cleared\n")
+            continue
+        if user_input == "/providers":
             for s in provider_status(live=False):
                 mark = "✓" if s["ready"] else "✗ (missing API key)"
                 shared = f"  [shares key with: {', '.join(s['shared_with'])}]" if s["shared_with"] else ""
                 print(f"  {s['alias']:14s} → {s['model']:35s} {mark}{shared}")
             print("  (or type any litellm model string, e.g. ollama/llama3.1, openai/gpt-4o)")
-            print("  'status' does a live check | 'add' registers a new provider\n")
+            print("  '/status' does a live check | '/add' registers a new provider\n")
             continue
-        if user_input == "status":
+        if user_input == "/status":
             print("\nChecking providers (one real call each — costs a few tokens per provider)...\n")
             results = provider_status(live=True)
             ok       = [s for s in results if s["live_ok"] is True]
@@ -1657,23 +1805,24 @@ if __name__ == "__main__":
                     print(_line(s))
             print()
             continue
-        if user_input == "plugins":
+        if user_input == "/plugins":
             if not _plugin_api.loaded:
                 print(f"\n  none loaded (drop a .py file in {_plugins_dir}/ — see plugins/README.md)\n")
             else:
                 print(f"\n  loaded: {', '.join(_plugin_api.loaded)}")
                 for cname, (_handler, chelp) in _plugin_api.commands.items():
-                    print(f"    {cname:12s} {chelp}")
+                    print(f"    /{cname:11s} {chelp}")
                 print()
             continue
-        if user_input in ("add", "add provider"):
+        if user_input in ("/add", "/add provider"):
             try:
                 alias = input("  short name (e.g. 'openai'): ").strip()
                 if not alias:
                     print("  cancelled\n"); continue
                 provider_type = input("  provider type (openai/anthropic/gemini/groq/mistral/"
-                                       "cohere/azure/bedrock/ollama): ").strip()
-                model_name = input("  model name (e.g. gpt-4o, llama3.1): ").strip()
+                                       "cohere/azure/bedrock/ollama/openrouter): ").strip()
+                model_name = input("  model name (e.g. gpt-4o, llama3.1, or for openrouter a slug "
+                                    "like meta-llama/llama-3.1-8b-instruct:free): ").strip()
                 api_base = input("  api_base (blank unless it's an OpenAI-compatible endpoint "
                                   "or local Ollama): ").strip() or None
                 key_input = input("  API key — paste a new key, or an EXISTING env var name "
@@ -1699,11 +1848,11 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"  Failed to add provider: {e}\n")
             continue
-        if user_input.startswith("model "):
+        if user_input.startswith("/model "):
             model = user_input.split(" ",1)[1].strip()
             print(f"Model: {model}\n")
             continue
-        if user_input == "project":
+        if user_input == "/project":
             cwd = os.getcwd()
             print(f"\n📁 Scanning {cwd} ...")
             try:
@@ -1712,7 +1861,8 @@ if __name__ == "__main__":
                 with _tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
                     f.write(summary)
                     tmp_path = f.name
-                doc_id, meta = ingest_document(tmp_path, "PROJECT_OVERVIEW.txt", uploaded_by="cli")
+                doc_id, meta = ingest_document(tmp_path, "PROJECT_OVERVIEW.txt",
+                                               namespace=_cli_namespace, uploaded_by="cli")
                 os.unlink(tmp_path)
                 recent_doc_id = doc_id
                 _project_scanned = True
@@ -1721,20 +1871,21 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Failed to scan project: {e}\n")
             continue
-        if user_input.startswith("doc "):
+        if user_input.startswith("/doc "):
             path = user_input.split(" ", 1)[1].strip().strip('"')
             if not os.path.isfile(path):
                 print(f"No such file: {path}\n")
                 continue
             try:
-                doc_id, meta = ingest_document(path, os.path.basename(path), uploaded_by="cli")
+                doc_id, meta = ingest_document(path, os.path.basename(path),
+                                               namespace=_cli_namespace, uploaded_by="cli")
                 recent_doc_id = doc_id
                 print(f"\n📄 Ingested '{meta['filename']}' — {meta['chunk_count']} chunks. "
                       f"Ask away, it'll use this doc.\n")
             except Exception as e:
                 print(f"Failed to ingest: {e}\n")
             continue
-        if user_input.startswith("image "):
+        if user_input.startswith("/image "):
             rest = user_input.split(" ", 1)[1].strip()
             path, _, question = rest.partition(" ")
             path = path.strip('"')
@@ -1749,20 +1900,28 @@ if __name__ == "__main__":
                 continue
             with open(path, "rb") as f:
                 img_bytes = f.read()
-            result = ask_image(img_bytes, mime, question, user="cli")
-            print(f"\n◆ VISION [{result['source']}]\n\n{result['answer']}\n")
+            result = ask_image(img_bytes, mime, question, namespace=_cli_namespace, user="cli")
+            print()
+            print(_c("2", f"◆ vision · {result['source']}"))
+            print(f"{_c('1;32', 'Recalq')} › {result['answer']}")
+            print(_RULE)
+            print()
             history.append({"role": "user", "content": f"[sent an image] {question}".strip()})
             history.append({"role": "assistant", "content": result["answer"]})
-            history[:] = history[-12:]
+            _persist_history()
+            continue
+        if user_input.startswith("/agent "):
+            _run_agent_and_print(user_input.split(" ", 1)[1].strip())
             continue
         _first_word = user_input.split(maxsplit=1)[0]
-        if _first_word in _plugin_api.commands:
-            _handler, _ = _plugin_api.commands[_first_word]
+        if _first_word.startswith("/") and _first_word[1:] in _plugin_api.commands:
+            _cname = _first_word[1:]
+            _handler, _ = _plugin_api.commands[_cname]
             _arg = user_input[len(_first_word):].strip()
             try:
                 _handler(_arg)
             except Exception as e:
-                print(f"  plugin command '{_first_word}' failed: {e}")
+                print(f"  plugin command '/{_cname}' failed: {e}")
             print()
             continue
         if not _project_scanned and any(t in user_input.lower() for t in _PROJECT_TRIGGERS):
@@ -1774,26 +1933,41 @@ if __name__ == "__main__":
                 with _tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
                     f.write(summary)
                     tmp_path = f.name
-                doc_id, _meta = ingest_document(tmp_path, "PROJECT_OVERVIEW.txt", uploaded_by="cli")
+                doc_id, _meta = ingest_document(tmp_path, "PROJECT_OVERVIEW.txt",
+                                                namespace=_cli_namespace, uploaded_by="cli")
                 os.unlink(tmp_path)
                 recent_doc_id = doc_id
                 _project_scanned = True
             except Exception as e:
                 print(f"  (project scan failed, answering without it: {e})")
 
+        if any(t in user_input.lower() for t in AGENT_TRIGGERS):
+            print(_c("2", "  (sounds like an action, not just a question — routing to /agent; "
+                           "say it plainly if you just wanted to talk about it)"))
+            _run_agent_and_print(user_input)
+            continue
+
         _query = _plugin_api.run_before(user_input)
+        def _on_explore(name, args):
+            preview = args.get("path") or args.get("query") or args.get("pattern") or args.get("url", "")
+            print(_c("2", f"  🔍 {name} {preview}"))
         result = ask(_query, model, history=history, recent_doc_id=recent_doc_id,
-                     has_attachments=bool(recent_doc_id))
+                     has_attachments=bool(recent_doc_id), root=os.getcwd(), on_explore=_on_explore,
+                     namespace=_cli_namespace)
         result["answer"] = _plugin_api.run_after(_query, result["answer"])
         src = result["source"]
         if src == "cache":
-            print(f"\n⚡ CACHE HIT | sim={result['similarity']} | hits={result['hits']}")
+            meta = f"⚡ cache hit · sim={result['similarity']} · hits={result['hits']}"
         elif result.get("compositional"):
-            print(f"\n🧩 COMPOSITIONAL | {result.get('cache_entries_used',0)} cached "
-                  f"+ {len(result.get('missing_concepts',[]))} new | intent={result.get('intent')}")
+            meta = (f"🧩 compositional · {result.get('cache_entries_used',0)} cached "
+                    f"+ {len(result.get('missing_concepts',[]))} new · intent={result.get('intent')}")
         else:
-            print(f"\n◆ LLM [{src}] | tokens={result.get('tokens_used',0)}")
-        print(f"\n{result['answer']}\n")
+            meta = f"◆ {src} · tokens={result.get('tokens_used',0)}"
+        print()
+        print(_c("2", meta))
+        print(f"{_c('1;32', 'Recalq')} › {result['answer']}")
+        print(_RULE)
+        print()
         history.append({"role": "user", "content": user_input})
         history.append({"role": "assistant", "content": result["answer"]})
-        history[:] = history[-12:]
+        _persist_history()

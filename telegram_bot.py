@@ -40,6 +40,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 import memlayer  # noqa: E402
+import agent as _agent  # noqa: E402 — same engine-level agent loop the CLI's /agent uses
 
 # memlayer's import above already claimed logging.basicConfig() (it's a
 # no-op on later calls) and set the root console handler to WARNING-only,
@@ -60,13 +61,37 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 _chat_model = {}    # chat_id -> provider alias, in-memory only
 _chat_doc = {}      # chat_id -> most recently attached doc_id, in-memory only
 _chat_history = {}  # chat_id -> rolling [{"role","content"}, ...], in-memory only
+_chat_root = {}     # chat_id -> agent working directory, in-memory only (/cd), default = bot's cwd
+
+_offset = 0  # getUpdates cursor; module-level so a confirmation wait (below) can consume
+             # updates without racing the main poll loop over the same offset
+
+
+def _telegram_namespace(chat_id):
+    """Combines this chat's own existing isolation (the privacy boundary
+    between different Telegram users/conversations) with the actual project
+    root (see /cd, _chat_root) — same fix as the CLI's project_namespace(),
+    layered on top of the per-chat scope rather than replacing it, so
+    switching projects within one chat can't mix their cache/docs either."""
+    root = _chat_root.get(chat_id, os.getcwd())
+    return f"telegram_{chat_id}_{memlayer.project_namespace(root)}"
+
+
+def _get_history(chat_id):
+    """In-memory first (fast path); falls back to Redis so a bot restart
+    doesn't wipe every conversation — same persistence the CLI's /reset-
+    able history uses, keyed by the same per-chat/project namespace."""
+    if chat_id not in _chat_history:
+        _chat_history[chat_id] = memlayer.load_history(_telegram_namespace(chat_id))
+    return _chat_history[chat_id]
 
 
 def _push_history(chat_id, user_text: str, assistant_text: str):
-    h = _chat_history.setdefault(chat_id, [])
+    h = _get_history(chat_id)
     h.append({"role": "user", "content": user_text})
     h.append({"role": "assistant", "content": assistant_text})
     del h[:-12]  # keep last 6 exchanges
+    memlayer.save_history(h, _telegram_namespace(chat_id))
 
 
 def _call(method: str, **params) -> dict:
@@ -108,16 +133,104 @@ def send(chat_id, text: str):
             log.error(f"sendMessage failed: {e}")
 
 
-def handle_command(chat_id, cmd, arg) -> bool:
-    ns = f"telegram_{chat_id}"
+def _get_updates(timeout=30):
+    """Poll once, advancing the shared _offset. Returns the list of updates."""
+    global _offset
+    resp = _call("getUpdates", offset=_offset, timeout=timeout)
+    updates = resp.get("result", [])
+    for u in updates:
+        _offset = max(_offset, u["update_id"] + 1)
+    return updates
+
+
+CONFIRM_TIMEOUT_S = 300
+
+
+def _wait_for_reply(chat_id, user_id, timeout_s=CONFIRM_TIMEOUT_S):
+    """Blocks until `user_id` replies in `chat_id`, or timeout_s elapses.
+    Any other user's message that arrives meanwhile is still handled right
+    away, so one pending agent confirmation doesn't freeze the bot for
+    everyone else.
+    ponytail: single-threaded wait — fine for a small trusted team (this
+    bot has no concurrency anywhere else either); a per-chat worker or
+    asyncio loop is the upgrade if the team outgrows that."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            updates = _get_updates(timeout=10)
+        except Exception as e:
+            log.error(f"getUpdates failed while waiting for confirmation: {e}")
+            time.sleep(2)
+            continue
+        for update in updates:
+            if "message" not in update:
+                continue
+            m = update["message"]
+            if m["chat"]["id"] == chat_id and str(m.get("from", {}).get("id", "")) == user_id:
+                return (m.get("text") or "").strip()
+            try:
+                handle_message(m)
+            except Exception as e:
+                log.error(f"handler error (during confirm wait): {e}")
+    return None
+
+
+def _telegram_confirm(chat_id, user_id):
+    def confirm(desc):
+        send(chat_id, f"{desc}\n\nReply yes or no.")
+        reply = _wait_for_reply(chat_id, user_id)
+        return bool(reply) and reply.lower().startswith("y")
+    return confirm
+
+
+def _telegram_on_step(chat_id):
+    def on_step(name, args):
+        if name == "update_plan":
+            lines = ["plan:"]
+            for s in args.get("steps", []):
+                mark = {"done": "[x]", "in_progress": "[>]"}.get(s.get("status"), "[ ]")
+                lines.append(f"  {mark} {s.get('task','')}")
+            send(chat_id, "\n".join(lines))
+            return
+        preview = (args.get("path") or args.get("command") or args.get("query")
+                   or args.get("pattern") or args.get("url", ""))
+        send(chat_id, f"→ {name} {preview}")
+    return on_step
+
+
+def _run_agent(chat_id, user_id, task):
+    """Thin Telegram-side adapter onto the engine's agent loop — same
+    agent.run() the CLI's /agent uses, just with Telegram-shaped confirm/
+    progress callbacks instead of stdin/print."""
+    root = _chat_root.get(chat_id, os.getcwd())
+    send(chat_id, f"\U0001f916 agent working in {root} ...")
+    try:
+        answer = _agent.run(task, _chat_model.get(chat_id, memlayer.default_model()),
+                             root=root, confirm=_telegram_confirm(chat_id, user_id),
+                             on_step=_telegram_on_step(chat_id), embedder=memlayer.embedder,
+                             architect_model=memlayer.architect_provider(),
+                             history=_get_history(chat_id))
+    except Exception as e:
+        log.error(f"agent.run failed: {e}")
+        answer = f"Agent failed: {e}"
+    send(chat_id, answer)
+    _push_history(chat_id, task, answer)
+
+
+def handle_command(chat_id, user_id, cmd, arg) -> bool:
+    ns = _telegram_namespace(chat_id)
     if cmd in ("/start", "/help"):
         send(chat_id, "Commands: /model <name> | /providers | /stats | /cache | /reset | /help\n"
+                       "/cd <path> | /agent <task> — point the agent at a project directory on "
+                       "the server, then have it read/edit files and run shell commands there.\n"
                        "Send a PDF/DOCX/TXT to attach it (questions after use it).\n"
                        "Send a photo (with an optional caption) to ask about an image — "
                        "you can ask follow-ups about it afterward.\n"
-                       "Anything else is a question for the engine.")
+                       "Anything else is a question for the engine — phrasing it as an action "
+                       "(\"find the bug in x.py\", \"add a feature that...\") runs the agent too.")
     elif cmd == "/reset":
         _chat_history.pop(chat_id, None)
+        memlayer.clear_history(_telegram_namespace(chat_id))
         _chat_doc.pop(chat_id, None)
         send(chat_id, "Conversation and attached-doc context cleared.")
     elif cmd == "/providers":
@@ -138,6 +251,25 @@ def handle_command(chat_id, cmd, arg) -> bool:
         entries = memlayer.list_cache_entries(ns)[:10]
         send(chat_id, "\n".join(f"[{e.get('hits',0)} hits] {e['query'][:70]}" for e in entries)
              or "(empty)")
+    elif cmd == "/cd":
+        if not arg:
+            send(chat_id, f"current: {_chat_root.get(chat_id, os.getcwd())}")
+        elif os.path.isdir(arg):
+            _chat_root[chat_id] = os.path.abspath(arg)
+            _chat_doc.pop(chat_id, None)  # a doc attached in the old project shouldn't
+                                           # be "recently attached" context in the new one
+            _chat_history.pop(chat_id, None)  # drop the old project's in-memory history so
+                                               # the next _get_history() reloads the new
+                                               # project's own (namespace changed with root)
+            send(chat_id, f"agent working directory set to {_chat_root[chat_id]} "
+                           f"(cache/docs/history now scoped to this project)")
+        else:
+            send(chat_id, f"no such directory: {arg}")
+    elif cmd == "/agent":
+        if not arg:
+            send(chat_id, "usage: /agent <task>")
+        else:
+            _run_agent(chat_id, user_id, arg)
     else:
         return False
     return True
@@ -161,7 +293,7 @@ def handle_document(chat_id, user_id, doc: dict):
             f.write(data)
             path = f.name
         doc_id, meta = memlayer.ingest_document(
-            path, filename, namespace=f"telegram_{chat_id}", uploaded_by=user_id)
+            path, filename, namespace=_telegram_namespace(chat_id), uploaded_by=user_id)
         _chat_doc[chat_id] = doc_id
         send(chat_id, f"Ingested '{meta['filename']}' — {meta['chunk_count']} chunks. Ask away.")
     except Exception as e:
@@ -182,7 +314,7 @@ def handle_photo(chat_id, user_id, photo_sizes: list, caption: str):
     try:
         data = _download_file(largest["file_id"])
         result = memlayer.ask_image(data, "image/jpeg", caption,
-                                     namespace=f"telegram_{chat_id}", user=user_id)
+                                     namespace=_telegram_namespace(chat_id), user=user_id)
         answer = result.get("answer", "(no answer)")
         send(chat_id, f"{answer}\n\n— via {result.get('source', '?')}")
         _push_history(chat_id, f"[sent an image] {caption}".strip(), answer)
@@ -219,15 +351,22 @@ def handle_message(msg: dict):
     if text.startswith("/"):
         parts = text.split(maxsplit=1)
         cmd, arg = parts[0], (parts[1] if len(parts) > 1 else "")
-        if handle_command(chat_id, cmd, arg.strip()):
+        if handle_command(chat_id, user_id, cmd, arg.strip()):
             return
+
+    if any(t in text.lower() for t in memlayer.AGENT_TRIGGERS):
+        send(chat_id, "(sounds like an action, not just a question — running the agent; "
+                       "say it plainly if you just wanted to talk about it)")
+        _run_agent(chat_id, user_id, text)
+        return
 
     model = _chat_model.get(chat_id, memlayer.default_model())
     recent_doc_id = _chat_doc.get(chat_id)
     try:
-        result = memlayer.ask(text, model, history=_chat_history.get(chat_id),
-                              namespace=f"telegram_{chat_id}", user=user_id,
-                              recent_doc_id=recent_doc_id, has_attachments=bool(recent_doc_id))
+        result = memlayer.ask(text, model, history=_get_history(chat_id),
+                              namespace=_telegram_namespace(chat_id), user=user_id,
+                              recent_doc_id=recent_doc_id, has_attachments=bool(recent_doc_id),
+                              root=_chat_root.get(chat_id, os.getcwd()))
         answer = result.get("answer") or "(no answer)"
         send(chat_id, f"{answer}\n\n— via {result.get('source', '?')}")
         _push_history(chat_id, text, answer)
@@ -253,16 +392,14 @@ def main():
         log.warning("TELEGRAM_ALLOWED_USERS not set — bot will reply to no one until it is")
 
     log.info("Telegram bot started, long-polling...")
-    offset = 0
     while True:
         try:
-            resp = _call("getUpdates", offset=offset, timeout=30)
+            updates = _get_updates(timeout=30)
         except Exception as e:
             log.error(f"getUpdates failed: {e} — retrying in 5s")
             time.sleep(5)
             continue
-        for update in resp.get("result", []):
-            offset = update["update_id"] + 1
+        for update in updates:
             if "message" in update:
                 try:
                     handle_message(update["message"])

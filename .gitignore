@@ -17,3 +17,4 @@ recalq_private_key.pem
 license.json
 *.before_*
 *_old.py
+loadtest.py  # dead code for the pre-CLI web UI's /login+/api/ask, has a hardcoded credential

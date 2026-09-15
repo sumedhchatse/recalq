@@ -13,7 +13,10 @@
 # network issue, missing API key).
 #
 # Supported provider types: gemini, anthropic, openai, azure, groq,
-# mistral, cohere, ollama (local), bedrock — anything LiteLLM supports.
+# mistral, cohere, ollama (local), bedrock, openrouter — anything LiteLLM
+# supports. openrouter is worth knowing about: one API key, access to 100+
+# models (including several free ones) instead of hunting down a separate
+# key per vendor — see the commented example below.
 
 providers:
 
@@ -44,35 +47,51 @@ providers:
     display_name: "Groq (fast)"
     cost_per_1k_tokens: 0.0
 
-  N_deepseek:
-    enabled: true
-    provider_type: openai     # DeepSeek uses OpenAI-compatible API
-    model: "deepseek-ai/deepseek-v4-flash"
-    api_key_env: NVIDIA_MODEL_API_KEY
-    api_base: "https://integrate.api.nvidia.com/v1"
-    fallback_to: gemini
-    display_name: "DeepSeek-v4-flash"
-    cost_per_1k_tokens: 0.00014
- 
-  nvidia_NEMO_3:
-    enabled: true
-    provider_type: openai     # NVIDIA uses OpenAI-compatible API
-    model: nvidia/nemotron-3-ultra-550b-a55b
-    api_key_env: NVIDIA_MODEL_API_KEY
-    api_base: https://integrate.api.nvidia.com/v1
-    fallback_to: gemini
-    display_name: "NVIDIA Nemotron-3-ultra"
-    cost_per_1k_tokens: 0.0
+  # Disabled 2026-09-15 — deepseek-v4-flash returned 410 Gone (model
+  # decommissioned). Tried the catalog's current replacement,
+  # deepseek-ai/deepseek-v4-flash-0731 — it exists but never responded
+  # across two separate attempts (40s and inconclusive timeouts), so it's
+  # not a reliable swap right now either. Re-verify before re-enabling —
+  # either NVIDIA fixes availability, or a different DeepSeek model exists
+  # by then.
+  # N_deepseek:
+  #   enabled: false
+  #   provider_type: openai
+  #   model: "deepseek-ai/deepseek-v4-flash-0731"
+  #   api_key_env: NVIDIA_MODEL_API_KEY
+  #   api_base: "https://integrate.api.nvidia.com/v1"
+  #   fallback_to: gemini
+  #   display_name: "DeepSeek-v4-flash"
+  #   cost_per_1k_tokens: 0.00014
 
-  N_kimi-k2:
-    enabled: true
-    provider_type: openai
-    model: "moonshotai/kimi-k2.6"
-    api_key_env: NVIDIA_MODEL_API_KEY
-    api_base: https://integrate.api.nvidia.com/v1
-    fallback_to: groq
-    display_name: "KIMI K2.6"
-    cost_per_1k_tokens: 0.0
+  # Disabled 2026-09-15 — never responds even after 60s (confirmed via
+  # direct curl, not just an internal timeout being too strict). This is a
+  # 550B model; likely persistently overloaded on NVIDIA's end rather than
+  # actually gone. Re-verify before re-enabling.
+  # nvidia_NEMO_3:
+  #   enabled: false
+  #   provider_type: openai
+  #   model: nvidia/nemotron-3-ultra-550b-a55b
+  #   api_key_env: NVIDIA_MODEL_API_KEY
+  #   api_base: https://integrate.api.nvidia.com/v1
+  #   fallback_to: gemini
+  #   display_name: "NVIDIA Nemotron-3-ultra"
+  #   cost_per_1k_tokens: 0.0
+
+  # Disabled 2026-09-15 — 404 "Function not found", confirmed via direct
+  # curl to be an ACCOUNT ENTITLEMENT issue, not a wrong model path (the
+  # model is listed in NVIDIA's own catalog for this key, but this account
+  # isn't approved to call it). Needs requesting access on NVIDIA's build
+  # platform — not fixable by editing this file.
+  # N_kimi-k2:
+  #   enabled: false
+  #   provider_type: openai
+  #   model: "moonshotai/kimi-k2.6"
+  #   api_key_env: NVIDIA_MODEL_API_KEY
+  #   api_base: https://integrate.api.nvidia.com/v1
+  #   fallback_to: groq
+  #   display_name: "KIMI K2.6"
+  #   cost_per_1k_tokens: 0.0
 
   kimi-k3:
     enabled: true
@@ -94,24 +113,31 @@ providers:
     display_name: "nemotron-3-super"
     cost_per_1k_tokens: 0.0
 
+  # gpt-oss-120b returned 410 Gone (decommissioned) — swapped to gpt-oss-20b
+  # 2026-09-15, confirmed working live (HTTP 200) on this same key.
   nvidia_openai_gpt:
     enabled: true
     provider_type: openai     # NVIDIA uses OpenAI-compatible API
-    model: "openai/gpt-oss-120b"
+    model: "openai/gpt-oss-20b"
     api_key_env: NVIDIA_MODEL_API_KEY
     api_base: https://integrate.api.nvidia.com/v1
     fallback_to: gemini
-    display_name: "openai_gpt_oss"
+    display_name: "openai_gpt_oss_20b"
     cost_per_1k_tokens: 0.0
 
-  nvidia_meta:
-    enabled: true
-    provider_type: openai  
-    model: "meta/llama-3.3-70b-instruct"
-    api_key_env: NVIDIA_MODEL_API_KEY
-    api_base: https://integrate.api.nvidia.com/v1
-    fallback_to: groq
-    display_name: "meta_llama-3.3-70b-instruct"
+  # Disabled 2026-09-15 — llama-3.3-70b-instruct returned 410 Gone
+  # (decommissioned). Tried nvidia/llama-3.1-nemotron-70b-instruct as a
+  # replacement — same account-entitlement 404 as N_kimi-k2 above (model
+  # exists in the catalog, this account isn't approved for it). No
+  # accessible llama-3.x-class model found on this key as of this writing.
+  # nvidia_meta:
+  #   enabled: false
+  #   provider_type: openai
+  #   model: "meta/llama-3.3-70b-instruct"
+  #   api_key_env: NVIDIA_MODEL_API_KEY
+  #   api_base: https://integrate.api.nvidia.com/v1
+  #   fallback_to: groq
+  #   display_name: "meta_llama-3.3-70b-instruct"
     cost_per_1k_tokens: 0.0
 
 
@@ -134,6 +160,20 @@ providers:
   #   display_name: "Llama 3.1 (local)"
   #   cost_per_1k_tokens: 0.0
 
+  # ── Example: add OpenRouter (one key, 100+ models incl. free ones) ──
+  # Get a key at https://openrouter.ai/keys, set OPENROUTER_API_KEY in .env.
+  # "model" is any OpenRouter model slug (see https://openrouter.ai/models) —
+  # swap it for a paid frontier model any time you want a stronger reasoner
+  # without adding another provider entry/key.
+  # openrouter_free:
+  #   enabled: false
+  #   provider_type: openrouter
+  #   model: "meta-llama/llama-3.1-8b-instruct:free"
+  #   api_key_env: OPENROUTER_API_KEY
+  #   fallback_to: gemini
+  #   display_name: "OpenRouter (Llama 3.1 8B, free)"
+  #   cost_per_1k_tokens: 0.0
+
   gemini_flash:
     enabled: true
     provider_type: gemini
@@ -145,6 +185,16 @@ providers:
 
 # ── Which provider is the default choice ────────────────────────
 auto_provider: groq
+
+# ── Architect mode for /agent (optional, off by default) ─────────
+# When set, /agent runs a two-pass "architect" flow (the technique Aider
+# popularized): this provider explores the project and writes a plan FIRST
+# (read-only — it never edits anything), then the normal chat model
+# executes that plan with the full read/write/shell toolset. Costs one
+# extra LLM call per /agent task in exchange for much more reliable
+# exploration on a hard/ambiguous request — worth it for a stronger model
+# here even if your everyday chat model stays on the free tier.
+# architect_provider: gemini_flash
 
 # Cache TTL / similarity threshold / Redis connection are set via
 # environment variables (.env) — see CACHE_TTL, SIMILARITY_CUTOFF,

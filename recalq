@@ -9,4 +9,6 @@ import os
 import sys
 
 _here = os.path.dirname(os.path.abspath(__file__))
-os.execv(sys.executable, [sys.executable, os.path.join(_here, "cache_layer", "memlayer.py"), *sys.argv[1:]])
+_venv_python = os.path.join(_here, ".venv", "bin", "python3")
+_python = _venv_python if os.path.exists(_venv_python) else sys.executable
+os.execv(_python, [_python, os.path.join(_here, "cache_layer", "memlayer.py"), *sys.argv[1:]])
