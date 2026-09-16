@@ -138,7 +138,7 @@ providers:
   #   api_base: https://integrate.api.nvidia.com/v1
   #   fallback_to: groq
   #   display_name: "meta_llama-3.3-70b-instruct"
-    cost_per_1k_tokens: 0.0
+  #   cost_per_1k_tokens: 0.0
 
 
   # ── Example: add OpenAI later just by uncommenting ──────────
