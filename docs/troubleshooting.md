@@ -39,6 +39,7 @@ via Redis), so one bad provider costs at most one timeout per 5 minutes.
 | Hugging Face "offline mode" / model not found | Recalq runs HF offline; model not downloaded for this user | `HF_HOME` in `.env` must point at the install's `models/` (install.sh does this) |
 | `redis.exceptions.ConnectionError` / `AuthenticationError` | Redis not running / wrong `REDIS_PASSWORD` | `systemctl --user status recalq-redis`; password in `.env` must match the one Redis started with |
 | install: `python3 can't create virtualenvs` | Ubuntu without `python3-venv` | `sudo apt install python3-venv` |
+| `ssh recalq@server` denied; sshd log: `Could not open user 'recalq' authorized keys ... Permission denied` | the key file is owned by someone else (e.g. copied with `cp -p`) | `sudo chown recalq:recalq /home/recalq/.ssh/authorized_keys` (mode 600, dir 700) |
 | install: `port 6379 is already in use` | another Recalq (e.g. the `~/memlayer` dev setup) is running | stop it; one Recalq per machine |
 
 ## Telegram

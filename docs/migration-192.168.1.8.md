@@ -7,6 +7,20 @@ free, no GPU, timezone UTC. Checked 2026-09-26 (read-only): podman 4.9.3,
 podman-compose, Python 3.12, git present; `python3-venv` and `gh` missing;
 lingering off; ports 6379/8081 free; `sudo` needs a password.
 
+> **Status: migrated 2026-09-26** (Phases 1–5 done; downtime 22:49–23:03
+> IST, 2045 Redis keys restored, 15/15 test suites green on the server).
+> Open: `gh auth login` as `recalq`; lock the `recalq` password; Phase 6
+> (retire the old setup) after a few days.
+>
+> Gotchas hit during the real run:
+> - `sudo cp -p ~/.ssh/authorized_keys /home/recalq/.ssh/` keeps *sumedh*
+>   as owner → sshd can't read it ("Could not open user 'recalq' authorized
+>   keys ... Permission denied"). Use `sudo install -m 600 -o recalq -g recalq`.
+> - `pkill -f "install.sh ..."` over ssh also matches the ssh command's own
+>   shell. Kill by PID.
+> - install.sh re-runs used to pull ~3 GB of CUDA wheels on GPU-less
+>   servers (fixed in 83bd28b).
+
 Expected downtime: ~10 minutes (Telegram bot + data copy). Rollback at any
 point: see the end.
 
