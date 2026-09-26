@@ -4,6 +4,10 @@ A terminal-first memory/cache layer over any LLM (or a local Ollama model).
 No web UI, no license check, no proxy server. Talk to it from the CLI, from
 Telegram, or as an MCP tool inside Claude Code.
 
+Full documentation — architecture, configuration, every command,
+operations, troubleshooting, security, and the migration plan — is in
+[`docs/`](docs/README.md).
+
 ## 1. API keys — where they go
 
 Two files, two different jobs:
