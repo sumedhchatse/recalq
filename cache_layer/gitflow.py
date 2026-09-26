@@ -81,11 +81,12 @@ def run_as_pr(task, run_fn, root):
     finally:
         _git(root, "switch", "-q", base)
 
+    if not changed:
+        _git(root, "branch", "-D", branch)  # nothing on it — don't leave it behind
     if error:
         return (f"Agent failed: {error}" + (f"\nPartial work committed on branch {branch}."
                                             if changed else ""))
     if not changed:
-        _git(root, "branch", "-D", branch)
         return f"{summary}\n\n(No files changed — no branch or PR created.)"
 
     report = f"{summary}\n\nCommitted on branch {branch} (you're back on {base})."

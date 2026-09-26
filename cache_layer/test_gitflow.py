@@ -60,6 +60,11 @@ def test_pr_agent_crash_keeps_partial_work_off_base():
     assert gitflow._git(d, "rev-parse", "--abbrev-ref", "HEAD") == "main"
     assert open(os.path.join(d, "calc.py")).read() == "x = 1\n"
 
+    def boom_early(task):
+        raise RuntimeError("provider down")
+    assert "Agent failed" in gitflow.run_as_pr("early", boom_early, d)
+    assert not any("early" in b for b in gitflow._git(d, "branch", "--format=%(refname:short)").split())
+
 
 def test_review_diff_picks_uncommitted_or_branch():
     d = _repo()

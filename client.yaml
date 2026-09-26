@@ -93,8 +93,12 @@ providers:
   #   display_name: "KIMI K2.6"
   #   cost_per_1k_tokens: 0.0
 
+  # Disabled 2026-09-26 — account suspended for insufficient balance
+  # (RateLimitError on every call); while enabled it used up one of each
+  # request's PROVIDER_MAX_ATTEMPTS fallback slots. Recharge on Moonshot
+  # AI's platform, then set enabled: true.
   kimi-k3:
-    enabled: true
+    enabled: false
     provider_type: openai
     model: "kimi-k3"
     api_key_env: KIMI_K3_API_KEY
