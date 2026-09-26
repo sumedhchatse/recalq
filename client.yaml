@@ -213,17 +213,17 @@ agent_provider: nvidia_nemotron-3-super
 # kind: digest (git log summary) | usage (team /usage) | bench (re-pick
 #       agent_provider) | ask (question about a project) | pr (agent task
 #       -> branch + PR; shell only runs if AGENT_SANDBOX is on)
-# schedules:
-#   - name: morning-digest
-#     when: "daily 09:00"
-#     kind: digest
-#     project: /home/sumedh/memlayer
-#     chat: 795445523
-#   - name: weekly-usage
-#     when: "weekly mon 09:00"
-#     kind: usage
-#     chat: 795445523
-#   - name: weekly-bench
-#     when: "weekly sun 03:00"
-#     kind: bench
-#     chat: 795445523
+schedules:
+  - name: morning-digest
+    when: "daily 09:00"
+    kind: digest
+    project: /home/sumedh/memlayer
+    chat: 795445523
+  - name: weekly-usage
+    when: "weekly mon 09:00"
+    kind: usage
+    chat: 795445523
+  - name: weekly-bench
+    when: "weekly sun 03:00"
+    kind: bench
+    chat: 795445523
