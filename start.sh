@@ -23,7 +23,7 @@ set +a
 # ── Start embedding service (dedicated batching process) ─────
 echo "⏳ Starting embedding service..."
 cd "$MDIR"
-nohup uvicorn embedding_service:app --host 0.0.0.0 --port 8081 --workers 1 \
+nohup uvicorn embedding_service:app --host 127.0.0.1 --port 8081 --workers 1 \
   > "$MDIR/embedding_service.log" 2>&1 &
 echo $! > "$MDIR/.embed.pid"
 for i in {1..30}; do

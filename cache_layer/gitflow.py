@@ -23,8 +23,14 @@ class GitError(RuntimeError):
     pass
 
 
+# Never run repo-controlled code: hooks and core.fsmonitor in .git would
+# execute whatever the agent (or anything it ran) put there. Also means the
+# team's own git hooks don't run on /pr commits.
+_SAFE_GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+
+
 def _git(root, *args):
-    proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    proc = subprocess.run([*_SAFE_GIT, *args], cwd=root, capture_output=True, text=True)
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {(proc.stderr or proc.stdout).strip()[:300]}")
     return proc.stdout.strip()
@@ -122,12 +128,18 @@ def review_diff(root, target=""):
         return f"PR #{target}", proc.stdout
     current = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     base = target or _default_base(root)
+    if target:
+        # Must name a real commit — otherwise "/review --output=/some/path"
+        # is a git option, not a ref, and writes files wherever it points.
+        if target.startswith("-"):
+            raise GitError(f"'{target}' isn't a branch or commit")
+        _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{target}^{{commit}}")
     if not base or base == current:
         # `git diff HEAD` skips untracked files — often the most important
         # part of a change (a whole new module) — so add them as new files.
         diff = _git(root, "diff", "HEAD")
         for path in _git(root, "ls-files", "--others", "--exclude-standard").splitlines():
-            proc = subprocess.run(["git", "diff", "--no-index", "--", os.devnull, path],
+            proc = subprocess.run([*_SAFE_GIT, "diff", "--no-index", "--", os.devnull, path],
                                   cwd=root, capture_output=True, text=True)
             diff += "\n" + proc.stdout  # exit code 1 just means "files differ"
         return "uncommitted changes", diff.strip()
@@ -143,7 +155,7 @@ REVIEW_PROMPT = (
     "say 'No issues found.'")
 
 
-def review(root, model, target="", embedder=None, on_step=None):
+def review(root, model, target="", embedder=None, on_step=None, on_usage=None):
     try:
         label, diff = review_diff(root, target)
     except GitError as e:
@@ -157,4 +169,6 @@ def review(root, model, target="", embedder=None, on_step=None):
                                          f"{diff[:REVIEW_MAX_DIFF_CHARS]}{cut}\n```"}]
     found = agent.answer(msgs, model, root=root, max_steps=12, max_tokens=1500,
                          embedder=embedder, on_step=on_step)
+    if on_usage:
+        on_usage(found["model"], found["tokens_used"])
     return f"Review of {label}:\n\n{found['answer']}"

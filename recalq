@@ -11,4 +11,6 @@ import sys
 _here = os.path.dirname(os.path.abspath(__file__))
 _venv_python = os.path.join(_here, ".venv", "bin", "python3")
 _python = _venv_python if os.path.exists(_venv_python) else sys.executable
-os.execv(_python, [_python, os.path.join(_here, "cache_layer", "memlayer.py"), *sys.argv[1:]])
+if sys.argv[1:2] == ["test"]:
+    os.execv(_python, [_python, os.path.join(_here, "run_tests.py"), *sys.argv[2:]])
+os.execv(_python, [_python, os.path.join(_here, "cache_layer", "cli.py"), *sys.argv[1:]])

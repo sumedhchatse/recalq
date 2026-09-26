@@ -19,7 +19,7 @@ import ipaddress
 import subprocess
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import numpy as np
 import requests as _requests
@@ -165,11 +165,21 @@ def _is_safe_url(url):
 
 
 def web_fetch(url):
-    if not _is_safe_url(url):
-        return "error: refusing to fetch this URL (not a public http(s) address)"
+    # Redirects are followed by hand so every hop gets the same check — with
+    # requests' automatic following, a public URL could 302 to an internal one.
+    # ponytail: DNS rebinding (host resolves public at check time, private at
+    # fetch time) is still possible; pin the resolved IP if this is exposed.
     try:
-        resp = _requests.get(url, timeout=WEB_FETCH_TIMEOUT,
-                             headers={"User-Agent": "Recalq-agent/1.0"})
+        for _hop in range(5):
+            if not _is_safe_url(url):
+                return "error: refusing to fetch this URL (not a public http(s) address)"
+            resp = _requests.get(url, timeout=WEB_FETCH_TIMEOUT, allow_redirects=False,
+                                 headers={"User-Agent": "Recalq-agent/1.0"})
+            if not resp.is_redirect:
+                break
+            url = urljoin(url, resp.headers.get("location", ""))
+        else:
+            return "error: too many redirects"
         resp.raise_for_status()
         text = re.sub(r"<[^>]+>", " ", resp.text)  # crude tag strip, no new dependency
         text = re.sub(r"\s+", " ", text).strip()
@@ -303,6 +313,15 @@ TOOLS = [
             "url": {"type": "string"}}, "required": ["url"]}}}] if WEB_FETCH_ENABLED else [])
 
 
+def _writable_path(root, path):
+    """_safe_path, plus: never inside .git (hooks/config there run code on
+    the host's next git command)."""
+    full = _safe_path(root, path)
+    if ".git" in os.path.relpath(full, os.path.realpath(root)).split(os.sep):
+        raise ValueError(f"'{path}' is inside .git — the agent may not edit git internals")
+    return full
+
+
 def _safe_path(root, path):
     """Resolve `path` under `root`, refusing anything that escapes it —
     same directory-scoping Claude Code/Cursor apply to their file tools."""
@@ -341,9 +360,12 @@ def _stack(root):
 def _save_stack(root):
     real = os.path.realpath(root)
     try:
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        # Private: checkpoints hold full file contents, and on a shared team
+        # host other users mustn't read them.
+        os.makedirs(CHECKPOINT_DIR, mode=0o700, exist_ok=True)
+        os.chmod(CHECKPOINT_DIR, 0o700)
         tmp = _ckpt_file(real) + ".tmp"
-        with open(tmp, "w") as f:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump(_undo.get(real, []), f)
         os.replace(tmp, _ckpt_file(real))
     except OSError:
@@ -444,7 +466,15 @@ def _sandbox_argv(command, root):
     # controllers delegated, and asking for cpu makes every run fail.
     return [SANDBOX, "run", "--rm", "--network=none", "--security-opt", "label=disable",
             "--memory=2g", "--pids-limit=512", *user,
-            "-v", f"{real}:{real}", "-w", real, SANDBOX_IMAGE, "sh", "-c", command]
+            "-v", f"{real}:{real}", *_git_ro(real), "-w", real, SANDBOX_IMAGE, "sh", "-c", command]
+
+
+def _git_ro(real):
+    """.git read-only inside the sandbox: a writable .git lets sandboxed code
+    plant a hook or core.fsmonitor that the HOST then runs on the next git
+    command (e.g. /pr's commit) — a full sandbox escape."""
+    g = os.path.join(real, ".git")
+    return ["-v", f"{g}:{g}:ro"] if os.path.exists(g) else []
 
 
 def _auto_allowed(command):
@@ -476,7 +506,7 @@ def _run_tool(name, args, root, confirm, embedder=None, model=None):
         full = _safe_path(root, args.get("path", "."))
         return "\n".join(sorted(os.listdir(full)))
     if name == "edit_file":
-        full = _safe_path(root, args["path"])
+        full = _writable_path(root, args["path"])
         if not os.path.exists(full):
             return f"error: {args['path']} does not exist — use write_file to create a new file"
         with open(full) as f:
@@ -496,7 +526,7 @@ def _run_tool(name, args, root, confirm, embedder=None, model=None):
             f.write(new_content)
         return f"edited {args['path']}"
     if name == "write_file":
-        full = _safe_path(root, args["path"])
+        full = _writable_path(root, args["path"])
         new_content = args.get("content", "")
         old_content = None
         if os.path.exists(full):

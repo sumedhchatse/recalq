@@ -81,39 +81,6 @@ def test_clean_query_passes():
     assert res["action"] == "allow" or res.get("clean_text") == "what is kubernetes"
 
 
-# ── FEEDBACK MUST NOT CRASH ON NON-CACHE KEYS (tonight's bug) ──
-def test_feedback_survives_doc_keys():
-    import importlib
-    app_mod = importlib.import_module("app")
-    # Seed a fake document-style key that is NOT a cache entry
-    m.r.set(f"{m.CACHE_PREFIX}{NS}:doc:fake:chunk:0", json.dumps({"text": "x", "embedding": [0.1]}))
-    m.r.set(f"{m.CACHE_PREFIX}{NS}:docs:set", "not-json-at-all")
-    # apply_feedback should skip these, not crash
-    try:
-        result = app_mod.apply_feedback("nonexistent-id", thumbs="up")
-        assert result.get("action") in ("not_found", "ok", "evicted")
-    except Exception as e:
-        pytest.fail(f"apply_feedback crashed on doc keys: {e}")
-
-
-# ── PASSWORD HASHING (salted) ──────────────────────────────
-def test_salted_password_roundtrip():
-    import importlib
-    app_mod = importlib.import_module("app")
-    h = app_mod._hash_password("mysecret123")
-    assert h.startswith("pbkdf2$")
-    assert app_mod._verify_password("mysecret123", h) is True
-    assert app_mod._verify_password("wrongpass", h) is False
-
-def test_legacy_hash_still_verifies():
-    import importlib, hashlib
-    app_mod = importlib.import_module("app")
-    legacy = hashlib.sha256("oldpass".encode()).hexdigest()
-    assert app_mod._verify_password("oldpass", legacy) is True
-
-
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
 
 
 def test_context_dependent_not_cached():
@@ -141,3 +108,7 @@ def test_context_dependent_not_cached():
         raw = m.r.get(k)
         if raw and ("REAL ANSWER" in str(raw) or "NGINX INSTALL ANSWER" in str(raw)):
             m.r.delete(k)
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

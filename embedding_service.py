@@ -13,7 +13,7 @@ WHY THIS SOLVES "user 2 waits":
     MORE of them for I/O concurrency.
 
 Run it standalone:
-  uvicorn embedding_service:app --host 0.0.0.0 --port 8081 --workers 1
+  uvicorn embedding_service:app --host 127.0.0.1 --port 8081 --workers 1
 """
 import asyncio
 import os

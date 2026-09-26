@@ -249,6 +249,11 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
     elif cmd == "/model":
         if not arg:
             send(chat_id, f"current: {_chat_model.get(chat_id, memlayer.default_model())}")
+        elif arg not in memlayer.provider_registry() and not memlayer.is_admin(user_id):
+            # A raw litellm string (e.g. anthropic/claude-opus-...) would use any
+            # key in the server's env with no cost_per_1k configured — spend the
+            # budget can't see. Only admins may go outside client.yaml.
+            send(chat_id, f"'{arg}' isn't a configured provider — pick one from /providers.")
         else:
             _chat_model[chat_id] = arg
             send(chat_id, f"model set to {arg}")
@@ -312,11 +317,12 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
             send(chat_id, out)
             _push_history(chat_id, f"/pr {arg}", out)
     elif cmd == "/review":
-        import gitflow
         send(chat_id, "\U0001f50e reviewing ...")
-        send(chat_id, gitflow.review(_chat_root.get(chat_id, os.getcwd()),
-                                     _chat_model.get(chat_id) or memlayer.agent_provider()
-                                     or memlayer.default_model(), arg, embedder=memlayer.embedder))
+        send(chat_id, memlayer.review_code(_chat_root.get(chat_id, os.getcwd()),
+                                           _chat_model.get(chat_id) or memlayer.agent_provider()
+                                           or memlayer.default_model(), arg, user=user_id,
+                                           namespace=_telegram_namespace(chat_id),
+                                           embedder=memlayer.embedder))
     elif cmd == "/bench":
         if not memlayer.is_admin(user_id):
             send(chat_id, "Only admins can run /bench (it changes the team's agent model).")
