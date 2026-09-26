@@ -37,10 +37,35 @@ def test_due_fires_once_per_slot_and_not_on_first_sight():
     assert not scheduler.due(job, r, datetime(2026, 9, 27, 9, 30))    # only once
 
 
+def test_bench_checks_are_strict():
+    import tempfile
+    notes, rename = bench.TASKS[2], bench.TASKS[3]
+    with tempfile.TemporaryDirectory() as d:
+        # added in the wrong section -> fail
+        open(os.path.join(d, "NOTES.md"), "w").write(bench.NOTES.replace(
+            "- Tag a release.\n", "- Tag a release.\n- Run ./app test before committing.\n"))
+        assert not notes["check"](d)
+        open(os.path.join(d, "NOTES.md"), "w").write(bench.NOTES_DONE)
+        assert notes["check"](d)
+        # renamed only the definition -> fail
+        open(os.path.join(d, "util.py"), "w").write("def make_slug(text):\n    return text\n")
+        open(os.path.join(d, "main.py"), "w").write("from util import slugify\n")
+        assert not rename["check"](d)
+
+
 def test_bench_picks_a_model_that_passes_everything():
     def fake_run(task, alias, root, **kw):
         if alias != "good":
             return "gave up"
+        if "NOTES.md" in task:
+            open(os.path.join(root, "NOTES.md"), "w").write(bench.NOTES_DONE + "\n")  # trailing noise ok
+            return "done"
+        if "slugify" in task:
+            for f in ("util.py", "main.py"):
+                p = os.path.join(root, f)
+                text = open(p).read()
+                open(p, "w").write(text.replace("slugify", "make_slug"))
+            return "done"
         src = open(os.path.join(root, "calc.py")).read()
         src = src.replace("def add(a, b):\n    return a - b", "def add(a, b):\n    return a + b")
         if "sub(" in task:
@@ -69,5 +94,6 @@ def test_bench_picks_a_model_that_passes_everything():
 if __name__ == "__main__":
     test_last_slot()
     test_due_fires_once_per_slot_and_not_on_first_sight()
+    test_bench_checks_are_strict()
     test_bench_picks_a_model_that_passes_everything()
     print("ok")

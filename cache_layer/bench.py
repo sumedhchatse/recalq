@@ -1,5 +1,6 @@
 """
-bench.py — /bench: run a few small, fixed coding tasks through /agent on
+bench.py — /bench: run a few small, fixed coding tasks (a scoped fix, a
+feature, an exact docs edit, a multi-file rename) through /agent on
 every ready provider and pick the best one for client.yaml's
 agent_provider. Free models appear, change and disappear constantly; this
 keeps /agent on one that actually works without anyone hand-testing.
@@ -33,6 +34,17 @@ def _func(src, name):
     return m.group(0) if m else ""
 
 
+NOTES = ("# Notes\n\n## Setup\n\n- Install Python 3.11.\n- Copy .env.example to .env.\n\n"
+         "## Deploy\n\n- Tag a release.\n")
+NOTES_DONE = NOTES.replace("- Copy .env.example to .env.\n",
+                           "- Copy .env.example to .env.\n- Run ./app test before committing.\n")
+
+
+def _lines(text):
+    """Lines without trailing whitespace or blank-line noise at the end."""
+    return [line.rstrip() for line in text.rstrip().splitlines()]
+
+
 # Each: files to create, the task, and a check(dir) -> bool on the result.
 TASKS = [
     {"name": "scoped fix",
@@ -47,6 +59,21 @@ TASKS = [
      "task": "add a sub(a, b) function to calc.py so test_calc.py passes",
      "check": lambda d: re.search(r"return\s+a\s*-\s*b", _func(_src(d), "sub")) is not None
      and _src(d, "test_calc.py").startswith("from calc import add, sub")},  # didn't edit the test
+    # The kind of edit a model failed live (2026-09-26): it described the
+    # change at length instead of calling edit_file. Graded exactly.
+    {"name": "docs edit",
+     "files": {"NOTES.md": NOTES},
+     "task": "In NOTES.md, add the bullet '- Run ./app test before committing.' as the last "
+             "bullet of the '## Setup' section. Change nothing else.",
+     "check": lambda d: _lines(_src(d, "NOTES.md")) == _lines(NOTES_DONE)},
+    {"name": "multi-file rename",
+     "files": {"util.py": "def slugify(text):\n    return text.lower().replace(' ', '-')\n",
+               "main.py": "from util import slugify\n\n\ndef title_slug(t):\n    return slugify(t)\n\n\n"
+                          "def path_slug(p):\n    return '/' + slugify(p)\n"},
+     "task": "Rename the function slugify to make_slug everywhere in this project.",
+     "check": lambda d: "slugify" not in _src(d, "util.py") + _src(d, "main.py")
+     and "def make_slug(text)" in _src(d, "util.py")
+     and _src(d, "main.py").count("make_slug") == 3},
 ]
 
 
