@@ -348,6 +348,32 @@ def test_read_file_flags_truncation():
         assert result == "hello", result
 
 
+def test_undo_restores_last_run():
+    yes = lambda desc: True
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "a.txt")
+        with open(path, "w") as f:
+            f.write("original")
+        agent._run_tool("edit_file", {"path": "a.txt", "old_string": "original",
+                                      "new_string": "v1"}, root, yes)
+        agent._run_tool("edit_file", {"path": "a.txt", "old_string": "v1",
+                                      "new_string": "v2"}, root, yes)
+        agent._run_tool("write_file", {"path": "sub/new.txt", "content": "x"}, root, yes)
+
+        assert agent.undo(root) == ["a.txt", os.path.join("sub", "new.txt")]
+        with open(path) as f:
+            assert f.read() == "original"  # first snapshot wins, not the v1 middle state
+        assert not os.path.exists(os.path.join(root, "sub", "new.txt"))
+        assert agent.undo(root) == []  # nothing left to undo
+
+        agent._run_tool("write_file", {"path": "b.txt", "content": "x"}, root, yes)
+        agent.chat_completion = lambda model, messages, max_tokens=800, tools=None, **kw: type(
+            "R", (), {"choices": [type("C", (), {"message": type(
+                "M", (), {"content": "nothing to do", "tool_calls": None})()})()]})()
+        agent.run("noop", "fake-model", root=root, confirm=yes)
+        assert agent.undo(root) == []  # a new run() resets what /undo reverts
+
+
 if __name__ == "__main__":
     test_write_file_then_stop()
     test_write_declined()
@@ -369,4 +395,5 @@ if __name__ == "__main__":
     test_web_fetch_disabled_by_default()
     test_web_fetch_blocks_private_addresses()
     test_read_file_flags_truncation()
+    test_undo_restores_last_run()
     print("ok")

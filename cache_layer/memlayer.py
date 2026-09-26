@@ -1647,7 +1647,7 @@ if __name__ == "__main__":
     # Commands are slash-prefixed so a real question ("what's the status of
     # my order?") can never be mistaken for a built-in command.
     _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
-                  "/plugins", "/model", "/doc", "/image", "/agent", "/reset"] + [
+                  "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/reset"] + [
                   f"/{c}" for c in _plugin_api.commands.keys()]
 
     _TTY = sys.stdout.isatty()
@@ -1681,7 +1681,7 @@ if __name__ == "__main__":
     print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
     print(_RULE)
     print(_c("2", "  /quit /stats /cache /providers /status /add /project /plugins /reset "
-                   "/model <name> /doc <path> /image <path> [q] /agent <task>"))
+                   "/model <name> /doc <path> /image <path> [q] /agent <task> /undo"))
     print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
     print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
     if _plugin_api.loaded:
@@ -1892,6 +1892,11 @@ if __name__ == "__main__":
             history.append({"role": "user", "content": f"[sent an image] {question}".strip()})
             history.append({"role": "assistant", "content": result["answer"]})
             _persist_history()
+            continue
+        if user_input == "/undo":
+            restored = _agent.undo(os.getcwd())
+            print(f"  reverted: {', '.join(restored)}\n" if restored
+                  else "  nothing to undo — the last agent run changed no files\n")
             continue
         if user_input.startswith("/agent "):
             _run_agent_and_print(user_input.split(" ", 1)[1].strip())

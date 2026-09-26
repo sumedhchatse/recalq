@@ -22,7 +22,7 @@ import requests as _requests
 
 from providers import chat_completion
 
-MAX_STEPS = 15
+MAX_STEPS = 25  # room for edit -> run tests -> fix -> re-run
 SHELL_TIMEOUT = 60
 DIFF_PREVIEW_LINES = 60
 
@@ -299,6 +299,29 @@ def _safe_path(root, path):
     return full
 
 
+# Pre-edit contents of every file the last run() touched, per project root,
+# so /undo can put them back. None = the file didn't exist (undo deletes it).
+_undo = {}
+
+
+def _snapshot(root, full, old_content):
+    _undo.setdefault(os.path.realpath(root), {}).setdefault(full, old_content)
+
+
+def undo(root):
+    """Restore every file the last run() in `root` changed. Returns the
+    relative paths restored (empty if there's nothing to undo)."""
+    changes = _undo.pop(os.path.realpath(root), {})
+    for full, old in changes.items():
+        if old is None:
+            if os.path.exists(full):
+                os.remove(full)
+        else:
+            with open(full, "w") as f:
+                f.write(old)
+    return sorted(os.path.relpath(p, root) for p in changes)
+
+
 def _run_tool(name, args, root, confirm, embedder=None):
     if name == "search_code":
         return search_code(root, embedder, args["query"])
@@ -330,6 +353,7 @@ def _run_tool(name, args, root, confirm, embedder=None):
         new_content = content.replace(old_s, new_s, 1)
         if not confirm(_make_diff(args["path"], content, new_content, verb="edit")):
             return "user declined this edit"
+        _snapshot(root, full, content)
         with open(full, "w") as f:
             f.write(new_content)
         return f"edited {args['path']}"
@@ -342,6 +366,7 @@ def _run_tool(name, args, root, confirm, embedder=None):
                 old_content = f.read()
         if not confirm(_make_diff(args["path"], old_content, new_content)):
             return "user declined this write"
+        _snapshot(root, full, old_content)
         os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
         with open(full, "w") as f:
             f.write(new_content)
@@ -489,6 +514,7 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
     exactly as before. history, if given, is the conversation so far
     ([{"role","content"}, ...], already trimmed by the caller) — without
     it, a follow-up like "do it" has no idea what "it" refers to."""
+    _undo.pop(os.path.realpath(root), None)  # /undo reverts the latest run only
     plan = _plan(task, history, architect_model, root, on_step, embedder) if architect_model else None
     plan_context = (f"\n\nA plan has already been made for this task:\n{plan}\n\nExecute it "
                     "precisely — re-read a file first if you need its exact current contents "
@@ -503,7 +529,11 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
             "replace, not a full resend, so it can't accidentally clobber parts you didn't mean "
             "to touch. Reserve write_file for new files or deliberate full rewrites. For a task "
             "with several distinct steps, call update_plan so progress is visible; skip it for "
-            "something short. Keep changes minimal and scoped to the request. When done, reply "
+            "something short. Keep changes minimal and scoped to the request. After changing code, "
+            "if the project has tests (test_*.py, a tests/ dir, package.json test script, "
+            "Makefile test target, ...), run the relevant ones with run_shell; if they fail "
+            "because of your change, fix it and re-run until they pass or you're sure the "
+            "failure isn't yours — say which in the summary. When done, reply "
             "with a short summary and make no further tool calls — and be precise in that "
             "summary: a write_file/edit_file/run_shell result of 'user declined this write/edit/"
             "command' means that change was NOT applied. Never describe a declined or failed "

@@ -221,8 +221,9 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
     ns = _telegram_namespace(chat_id)
     if cmd in ("/start", "/help"):
         send(chat_id, "Commands: /model <name> | /providers | /stats | /cache | /reset | /help\n"
-                       "/cd <path> | /agent <task> — point the agent at a project directory on "
-                       "the server, then have it read/edit files and run shell commands there.\n"
+                       "/cd <path> | /agent <task> | /undo — point the agent at a project directory on "
+                       "the server, then have it read/edit files and run shell commands there; "
+                       "/undo reverts the files its last run changed.\n"
                        "Send a PDF/DOCX/TXT to attach it (questions after use it).\n"
                        "Send a photo (with an optional caption) to ask about an image — "
                        "you can ask follow-ups about it afterward.\n"
@@ -265,6 +266,10 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
                            f"(cache/docs/history now scoped to this project)")
         else:
             send(chat_id, f"no such directory: {arg}")
+    elif cmd == "/undo":
+        restored = _agent.undo(_chat_root.get(chat_id, os.getcwd()))
+        send(chat_id, ("Reverted the last agent run: " + ", ".join(restored))
+             if restored else "Nothing to undo — the last agent run changed no files.")
     elif cmd == "/agent":
         if not arg:
             send(chat_id, "usage: /agent <task>")
