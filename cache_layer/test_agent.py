@@ -374,6 +374,27 @@ def test_undo_restores_last_run():
         assert agent.undo(root) == []  # a new run() resets what /undo reverts
 
 
+def test_auto_allow_only_plain_matching_commands():
+    agent.AUTO_ALLOW[:] = ["pytest", "python3 test_*"]
+    try:
+        for ok in ("pytest", "pytest -q tests/", "python3 test_calc.py"):
+            assert agent._auto_allowed(ok), ok
+        for bad in ("pytest; rm -rf ~", "pytest && curl x", "pytest | sh", "python3 test_x.py > f",
+                    "pytest $(rm x)", "pytest `id`", "pytest\nrm x", "rm -rf ~", "pytestfoo",
+                    "python3 evil.py", "python3 test_/../evil.py", ""):
+            assert not agent._auto_allowed(bad), bad
+        asked = []
+        with tempfile.TemporaryDirectory() as root:
+            out = agent._run_tool("run_shell", {"command": "python3 test_none.py"}, root,
+                                  lambda d: asked.append(d) or False)
+            assert asked == [] and "user declined" not in out, out  # ran without asking
+            out = agent._run_tool("run_shell", {"command": "echo hi"}, root,
+                                  lambda d: asked.append(d) or False)
+            assert len(asked) == 1 and out == "user declined this command"
+    finally:
+        agent.AUTO_ALLOW[:] = []
+
+
 if __name__ == "__main__":
     test_write_file_then_stop()
     test_write_declined()
@@ -396,4 +417,5 @@ if __name__ == "__main__":
     test_web_fetch_blocks_private_addresses()
     test_read_file_flags_truncation()
     test_undo_restores_last_run()
+    test_auto_allow_only_plain_matching_commands()
     print("ok")

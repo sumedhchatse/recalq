@@ -18,6 +18,8 @@ log = logging.getLogger("recalq.audit")
 
 AUDIT_KEY = "recalq:audit:log"      # Redis list key
 AUDIT_MAX = 5000                   # keep last N entries (auto-trimmed)
+SPEND_KEY = "recalq:spend:"         # + user:YYYY-MM -> $ spent that month
+COST_PER_1K = {}                    # provider alias -> $/1k tokens, filled by memlayer
 
 
 def record(r, *, user, query, model, source, namespace,
@@ -47,6 +49,15 @@ def record(r, *, user, query, model, source, namespace,
         r.ltrim(AUDIT_KEY, 0, AUDIT_MAX - 1)   # keep newest AUDIT_MAX
     except Exception as e:
         log.warning(f"Audit record failed: {e}")
+
+    cost = (tokens_used or 0) * COST_PER_1K.get(source, 0.0) / 1000
+    if cost:
+        try:
+            key = f"{SPEND_KEY}{entry['user']}:{time.strftime('%Y-%m')}"
+            r.incrbyfloat(key, cost)
+            r.expire(key, 40 * 86400)
+        except Exception as e:
+            log.warning(f"Spend record failed: {e}")
 
     # Also write a structured line to the plaintext log for durability
     log.info(
@@ -126,3 +137,12 @@ def usage_by_user(r, cost_per_1k):
         u["tokens_saved"] += e.get("tokens_saved") or 0
         u["cost_usd"] += (e.get("tokens_used") or 0) * cost_per_1k.get(src, 0.0) / 1000
     return out
+
+
+def month_spend(r, user) -> float:
+    """$ spent by `user` this calendar month (lifetime of the counter, not
+    the capped audit log)."""
+    try:
+        return float(r.get(f"{SPEND_KEY}{user}:{time.strftime('%Y-%m')}") or 0)
+    except Exception:
+        return 0.0

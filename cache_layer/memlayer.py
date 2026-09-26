@@ -20,7 +20,8 @@ from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from guardrails import check_query, check_answer
 from providers import (chat_completion, default_model, list_providers, cooldowns,
-                       provider_status, add_provider, save_api_key, architect_provider)
+                       provider_status, add_provider, save_api_key, architect_provider,
+                       use_redis, free_only, provider_registry)
 import agent
 import audit
 import sop_layer
@@ -104,6 +105,36 @@ r = redis.Redis(
 )
 r.ping()
 log.info("Redis connected ✓")
+use_redis(r)  # share provider cooldowns across CLI/Telegram/MCP
+audit.COST_PER_1K.update({a: p.get("cost_per_1k_tokens") or 0.0
+                          for a, p in provider_registry().items()})
+
+# ── Per-person monthly budget ────────────────────────────────
+# RECALQ_BUDGET_USD unset/0 = no limit. Over it, a person is still served —
+# cache hits as usual, and LLM calls only by free (cost 0) providers.
+BUDGET_USD = float(os.getenv("RECALQ_BUDGET_USD") or 0)
+_BUDGET_NOTE = "(Your monthly budget is used up — answered by a free model.)"
+
+
+def over_budget(user) -> bool:
+    return bool(BUDGET_USD) and user is not None and audit.month_spend(r, user) >= BUDGET_USD
+
+
+def _budgeted(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        over = over_budget(kwargs.get("user"))
+        with free_only(over):
+            result = fn(*args, **kwargs)
+        if over:
+            if isinstance(result, dict) and result.get("answer") and not result.get("cached"):
+                result["answer"] += "\n\n" + _BUDGET_NOTE
+            elif isinstance(result, str):
+                result += "\n\n" + _BUDGET_NOTE
+        return result
+    return wrapper
 
 log.info("Loading embedding model (first run downloads ~90MB)...")
 _local_embedder = SentenceTransformer("all-MiniLM-L6-v2")
@@ -1328,6 +1359,7 @@ def scan_project(root: str, max_files: int = 200, max_file_chars: int = 3000,
 # (gemini and claude both do) if you point this at something else.
 VISION_DEFAULT_MODEL = os.getenv("VISION_MODEL", "gemini")
 
+@_budgeted
 def ask_image(image_bytes: bytes, mime_type: str, question: str, model: str = None,
               namespace: str = None, user: str = None) -> dict:
     import base64
@@ -1355,6 +1387,7 @@ def ask_image(image_bytes: bytes, mime_type: str, question: str, model: str = No
         return {"answer": f"Error: {e}", "source": "error", "cached": False}
 
 
+@_budgeted
 def ask(query: str, model: str = "gemini", history: list = None, namespace: str = None, user: str = None, recent_doc_id: str = None, has_attachments: bool = False, role: str = "user", knowledge_grant: list = None, root: str = None, on_explore: callable = None) -> dict:
     _audit_start = time.time()
     # Resolve 'auto' to the real lowest-cost provider so the rest of the
@@ -1646,6 +1679,7 @@ def is_admin(user) -> bool:
     return str(user) in ADMINS
 
 
+@_budgeted
 def run_agent(task, model, *, user, namespace, **kwargs):
     """agent.run() plus an audit entry, so /agent work shows up in /usage
     like any other query (it's usually the most expensive kind)."""
@@ -1673,6 +1707,10 @@ def usage_report(user) -> str:
     for name, u in sorted(rows.items(), key=lambda kv: -kv[1]["tokens_used"]):
         lines.append(f"{name:16s} {u['queries']:7d} {u['cache_hits']:6d} {u['llm_calls']:5d} "
                      f"{u['tokens_used']:9d} {u['tokens_saved']:9d} {u['cost_usd']:8.4f}")
+    if BUDGET_USD:
+        lines.append(f"this month you've spent ${audit.month_spend(r, user):.4f} of your "
+                     f"${BUDGET_USD:.2f} budget" + (" — free models only until next month"
+                                                    if over_budget(user) else ""))
     if not is_admin(user):
         lines.append("(your usage only — admins listed in RECALQ_ADMINS see the whole team)")
     return "\n".join(lines)

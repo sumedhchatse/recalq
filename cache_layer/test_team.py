@@ -6,12 +6,15 @@ import tempfile
 import memlayer
 import audit
 import agent
+import providers
 
 TAG = "test_team_" + memlayer.hashlib.sha256(str(memlayer.time.time()).encode()).hexdigest()[:6]
 ALICE, BOB = f"{TAG}_alice", f"{TAG}_bob"
 
 
 def _cleanup():
+    for u in (ALICE, BOB):
+        memlayer.r.delete(f"{audit.SPEND_KEY}{u}:{memlayer.time.strftime('%Y-%m')}")
     for raw in memlayer.r.lrange(audit.AUDIT_KEY, 0, -1):
         if TAG in raw if isinstance(raw, str) else TAG.encode() in raw:
             memlayer.r.lrem(audit.AUDIT_KEY, 0, raw)
@@ -55,10 +58,42 @@ def test_agent_run_is_audited():
     assert newest["query"] == "[agent] do x", newest
 
 
+def test_budget_forces_free_models():
+    audit.COST_PER_1K["paid"] = 0.01
+    audit.record(memlayer.r, user=ALICE, query="q", model="m", source="paid", namespace=TAG,
+                 tokens_used=100_000)  # $1.00
+    assert abs(audit.month_spend(memlayer.r, ALICE) - 1.0) < 1e-9
+    seen = []
+
+    class Msg:
+        content, tool_calls = "done", None
+    resp = type("R", (), {"choices": [type("C", (), {"message": Msg()})()], "model": "m",
+                          "usage": None})()
+
+    def fake(*a, **kw):
+        seen.append(providers._FREE_ONLY.get())
+        return resp
+    agent.chat_completion = fake
+    old = memlayer.BUDGET_USD
+    try:
+        memlayer.BUDGET_USD = 0.5
+        assert memlayer.over_budget(ALICE) and not memlayer.over_budget(BOB)
+        with tempfile.TemporaryDirectory() as root:
+            out = memlayer.run_agent("x", "paid", user=ALICE, namespace=TAG, root=root)
+            assert seen == [True] and memlayer._BUDGET_NOTE in out, (seen, out)
+            seen.clear()
+            out = memlayer.run_agent("x", "paid", user=BOB, namespace=TAG, root=root)
+            assert seen == [False] and out == "done", (seen, out)
+        assert "of your $0.50 budget" in memlayer.usage_report(ALICE)
+    finally:
+        memlayer.BUDGET_USD = old
+
+
 if __name__ == "__main__":
     try:
         test_usage_by_user_and_admin_view()
         test_agent_run_is_audited()
+        test_budget_forces_free_models()
     finally:
         _cleanup()
     print("ok")

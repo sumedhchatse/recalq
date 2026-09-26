@@ -127,8 +127,14 @@ next); conversations stay per person. Identity is the OS login
   (from `cost_per_1k_tokens` in `client.yaml`). Admins see the whole team.
 - `RECALQ_ADMINS=alice,795445523` in `.env` — who counts as admin.
 - `/undo` — reverts the files the last `/agent` run changed.
+- `RECALQ_BUDGET_USD=5` — monthly spend cap per person. Over it, they
+  still get cache hits and free (cost 0) models, never paid ones.
 - A provider that fails is skipped for `PROVIDER_COOLDOWN` seconds (300)
-  and the next cheapest healthy one answers instead.
+  and the next cheapest healthy one answers instead. Shared through Redis,
+  so the CLI, Telegram bot and MCP server all skip it at once.
+- `AGENT_AUTO_ALLOW="pytest*,python3 test_*,npm test"` — shell commands
+  `/agent` may run without asking (anything with `; & | $ > <` or `..`
+  still asks).
 
 ## 4. Status checks
 

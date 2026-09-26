@@ -13,6 +13,7 @@ import time
 import json
 import socket
 import difflib
+import fnmatch
 import ipaddress
 import subprocess
 from urllib.parse import urlparse
@@ -322,6 +323,23 @@ def undo(root):
     return sorted(os.path.relpath(p, root) for p in changes)
 
 
+# Shell commands the agent may run without asking, e.g.
+# AGENT_AUTO_ALLOW="pytest*,python3 test_*,npm test" — so its run-tests-
+# then-fix loop doesn't need a "y" per test run. A command containing any
+# shell control character always asks, so "pytest; rm -rf ~" can't sneak
+# through on the "pytest*" pattern.
+AUTO_ALLOW = [p.strip() for p in os.getenv("AGENT_AUTO_ALLOW", "").split(",") if p.strip()]
+_SHELL_CONTROL = re.compile(r"[;&|`$<>\n\\]")
+
+
+def _auto_allowed(command):
+    cmd = command.strip()
+    if not cmd or _SHELL_CONTROL.search(cmd) or ".." in cmd:
+        return False
+    return any(fnmatch.fnmatchcase(cmd, pat) or fnmatch.fnmatchcase(cmd, pat + " *")
+               for pat in AUTO_ALLOW)
+
+
 def _run_tool(name, args, root, confirm, embedder=None):
     if name == "search_code":
         return search_code(root, embedder, args["query"])
@@ -372,7 +390,7 @@ def _run_tool(name, args, root, confirm, embedder=None):
             f.write(new_content)
         return f"wrote {args['path']}"
     if name == "run_shell":
-        if not confirm(_color(33, f"  ⚠ run: {args['command']}")):
+        if not _auto_allowed(args["command"]) and not confirm(_color(33, f"  ⚠ run: {args['command']}")):
             return "user declined this command"
         proc = subprocess.run(args["command"], shell=True, cwd=root, capture_output=True,
                                text=True, timeout=SHELL_TIMEOUT)

@@ -78,10 +78,56 @@ def test_ranked_cheapest_first_cooled_last():
     assert p.ranked_providers() == ["free2", "paid", "free1"]
 
 
+class FakeRedis:
+    def __init__(self):
+        self.d = {}
+    def set(self, k, v, ex=None):
+        self.d[k] = ex
+    def exists(self, k):
+        return k in self.d
+    def delete(self, k):
+        self.d.pop(k, None)
+    def ttl(self, k):
+        return self.d.get(k, -2)
+
+
+def test_cooldown_shared_through_redis():
+    _setup(dead={"x/paid"})
+    shared = FakeRedis()
+    p.use_redis(shared)
+    try:
+        p.chat_completion("paid", [])
+        p._cooldown_until.clear()  # simulate a *different* process: no local memory
+        calls = []
+        p.litellm.completion = lambda **kw: calls.append(kw["model"]) or "ok"
+        p.chat_completion("paid", [])
+        assert calls == ["x/free2"], calls  # skipped 'paid' because Redis said so
+        assert "paid" in p.cooldowns()
+    finally:
+        p.use_redis(None)
+
+
+def test_free_only_never_touches_paid():
+    calls = _setup(dead=set())
+    with p.free_only():
+        assert p.chat_completion("paid", []) == "ok:x/free2"
+    assert calls == ["x/free2"], calls
+    assert p.chat_completion("paid", []) == "ok:x/paid"  # context ended
+    p._PROVIDERS = {"paid": REG["paid"]}
+    with p.free_only():
+        try:
+            p.chat_completion("paid", [])
+            assert False, "should refuse"
+        except RuntimeError as e:
+            assert "budget" in str(e)
+
+
 if __name__ == "__main__":
     test_follows_chain_then_cheapest()
     test_failed_provider_is_skipped_next_time()
     test_missing_key_falls_back_instead_of_raising()
     test_all_dead_raises_and_all_cooled_retries()
     test_ranked_cheapest_first_cooled_last()
+    test_cooldown_shared_through_redis()
+    test_free_only_never_touches_paid()
     print("ok")

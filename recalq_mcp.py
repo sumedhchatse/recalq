@@ -152,7 +152,7 @@ def _call_recalq_ask(args: dict):
         return "error: empty query", True
     root = _resolve_path(args)
     model = args.get("model") or memlayer.default_model()
-    d = memlayer.ask(query, model, namespace=memlayer.project_namespace(root), root=root)
+    d = memlayer.ask(query, model, namespace=memlayer.project_namespace(root), root=root, user="mcp")
     return _tool_result_text(d), d.get("source") == "error"
 
 

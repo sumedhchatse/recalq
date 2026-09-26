@@ -10,6 +10,8 @@ import socket
 import logging
 import threading
 import time
+import contextlib
+import contextvars
 import yaml
 
 # This host's IPv6 route is a black hole (SYNs vanish, no RST) while IPv4
@@ -235,24 +237,79 @@ def _call_with_timeout(fn, _timeout, *args, **kwargs):
     return box["value"]
 
 
-# In-process circuit breaker: a provider that just failed (bad key, out of
-# credits, overloaded) is skipped for COOLDOWN_SECS instead of eating a full
-# REQUEST_TIMEOUT on every single request until someone notices.
-# ponytail: per-process memory only — the CLI, Telegram bot and MCP server
-# each learn failures separately; move to Redis if that duplication hurts.
+# Circuit breaker: a provider that just failed (bad key, out of credits,
+# overloaded) is skipped for COOLDOWN_SECS instead of eating a full
+# REQUEST_TIMEOUT on every request. Kept in Redis once use_redis() is called
+# (memlayer does), so the CLI, Telegram bot and MCP server share what they
+# learn; falls back to this process's own memory if Redis is unavailable.
 COOLDOWN_SECS = float(os.getenv("PROVIDER_COOLDOWN", "300"))
 MAX_ATTEMPTS = int(os.getenv("PROVIDER_MAX_ATTEMPTS", "3"))
-_cooldown_until = {}  # alias -> unix ts
+_cooldown_until = {}  # alias -> unix ts (local fallback)
+_store = None
+_COOL_KEY = "recalq:cooldown:"
+
+# Set (via free_only()) while serving someone over their budget: only
+# providers with cost_per_1k_tokens == 0 may answer.
+_FREE_ONLY = contextvars.ContextVar("recalq_free_only", default=False)
+
+
+def use_redis(r):
+    global _store
+    _store = r
+
+
+def _mark_failed(alias):
+    _cooldown_until[alias] = time.time() + COOLDOWN_SECS
+    if _store is not None:
+        try:
+            _store.set(_COOL_KEY + alias, 1, ex=max(1, int(COOLDOWN_SECS)))
+        except Exception:
+            pass
+
+
+def _mark_ok(alias):
+    _cooldown_until.pop(alias, None)
+    if _store is not None:
+        try:
+            _store.delete(_COOL_KEY + alias)
+        except Exception:
+            pass
 
 
 def _healthy(alias):
+    if _store is not None:
+        try:
+            return not _store.exists(_COOL_KEY + alias)
+        except Exception:
+            pass
     return _cooldown_until.get(alias, 0) <= time.time()
 
 
 def cooldowns() -> dict:
     """{alias: seconds_left} for providers currently being skipped."""
+    if _store is not None:
+        try:
+            return {a: _store.ttl(_COOL_KEY + a) for a in _PROVIDERS if not _healthy(a)}
+        except Exception:
+            pass
     now = time.time()
     return {a: int(t - now) for a, t in _cooldown_until.items() if t > now}
+
+
+@contextlib.contextmanager
+def free_only(active=True):
+    token = _FREE_ONLY.set(bool(active))
+    try:
+        yield
+    finally:
+        _FREE_ONLY.reset(token)
+
+
+def _is_free(alias):
+    p = _PROVIDERS.get(alias)
+    if p is None:  # raw litellm string: only a local ollama model is known-free
+        return alias.startswith("ollama/")
+    return (p.get("cost_per_1k_tokens") or 0) == 0
 
 
 def ranked_providers() -> list:
@@ -274,6 +331,11 @@ def _candidates(alias_or_model):
         chain.append(cur)
         cur = (_PROVIDERS.get(cur) or {}).get("fallback_to")
     order = chain + [a for a in ranked_providers() if a not in chain]
+    if _FREE_ONLY.get():
+        order = [a for a in order if _is_free(a)]
+        if not order:
+            raise RuntimeError("budget reached and no free provider is configured — "
+                               "ask an admin to raise RECALQ_BUDGET_USD or add a free model")
     healthy = [a for a in order if _healthy(a)]
     return (healthy or order)[:MAX_ATTEMPTS]
 
@@ -295,11 +357,11 @@ def chat_completion(alias_or_model: str, messages: list, max_tokens: int = 800,
             if tools:
                 kwargs["tools"] = tools
             resp = _call_with_timeout(litellm.completion, REQUEST_TIMEOUT, **kwargs)
-            _cooldown_until.pop(alias, None)
+            _mark_ok(alias)
             return resp
         except Exception as e:
             last_err = e
-            _cooldown_until[alias] = time.time() + COOLDOWN_SECS
+            _mark_failed(alias)
             log.warning(f"provider '{alias}' failed ({str(e)[:150]}) — skipping it for "
                         f"{COOLDOWN_SECS:.0f}s, trying next")
     raise last_err
