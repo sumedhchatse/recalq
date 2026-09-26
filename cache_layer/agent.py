@@ -598,7 +598,25 @@ def answer(messages, model, root=".", max_steps=10, max_tokens=800, on_step=None
         "it is not possible. Instead say plainly that you can only describe what should change "
         "from here, and that they need to ask again as an action (e.g. 'fix the bug in x.py') "
         "or use /agent to actually have it applied."}
+    convo = [exploring] + list(messages)
     answer_text, model_used, total_tokens, grounded = _loop(
-        [exploring] + list(messages), model, root, None, on_step, READONLY_TOOLS,
-        max_steps, max_tokens, embedder)
-    return {"answer": answer_text, "model": model_used, "tokens_used": total_tokens, "grounded": grounded}
+        convo, model, root, None, on_step, READONLY_TOOLS, max_steps, max_tokens, embedder)
+    return {"answer": answer_text, "model": model_used, "tokens_used": total_tokens,
+            "grounded": grounded, "files_read": _files_read(convo, root)}
+
+
+def _files_read(convo, root):
+    """Absolute paths of every file read_file actually returned during a
+    _loop over `convo` — so a cached answer can be dropped once any of the
+    files it was based on changes."""
+    ok_ids, paths = set(), {}
+    for m in convo:
+        if m.get("role") == "tool" and not str(m.get("content", "")).startswith("error"):
+            ok_ids.add(m.get("tool_call_id"))
+        for tc in m.get("tool_calls") or []:
+            if tc["function"]["name"] == "read_file":
+                try:
+                    paths[tc["id"]] = _safe_path(root, json.loads(tc["function"]["arguments"])["path"])
+                except Exception:
+                    pass
+    return sorted({p for i, p in paths.items() if i in ok_ids and os.path.isfile(p)})

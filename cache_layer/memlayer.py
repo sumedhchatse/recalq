@@ -322,7 +322,27 @@ def _shares_commons(namespace):
         return False
     return not any(ns.startswith(pfx) for pfx in _NO_COMMONS_PREFIXES)
 
-def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0, namespace: str = None, query_had_pii: bool = False, share_commons: bool = True):
+def _file_hash(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def _is_fresh(entry) -> bool:
+    """False once any project file this answer was based on has changed or
+    gone — a cached "what does foo() do?" must not outlive an edit to foo()."""
+    return all(_file_hash(p) == h for p, h in (entry.get("sources") or {}).items())
+
+
+def _drop_entry(entry, namespace):
+    r.delete(_cache_key(entry["id"], namespace))
+    r.delete(_exact_key(entry["query"], namespace))
+    log.info(f"STALE — dropped cached answer, its source files changed: '{entry['query'][:50]}'")
+
+
+def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0, namespace: str = None, query_had_pii: bool = False, share_commons: bool = True, user: str = None, files: list = None):
     # Never cache a query that has no meaning without its conversation —
     # the identical string from a different conversation would hit it at 1.0.
     if is_context_dependent(query):
@@ -348,6 +368,9 @@ def save_to_cache(query: str, answer: str, model_used: str, tokens_used: int = 0
         "flagged":     False,
         "intent":      detect_intent(query),
         "namespace":   _ns(namespace),
+        "asked_by":    str(user) if user is not None else None,
+        "sources":     {p: _file_hash(p) for p in (files or [])},
+        "verified_by": None,
         "embedding":   embedder.encode(normalise_query(query.lower()),
                                        convert_to_tensor=False).tolist()
     }
@@ -394,10 +417,14 @@ def find_exact_match(query: str, namespace: str = None):
         entry = json.loads(raw)
     except Exception:
         return None, 0.0
+    if not _is_fresh(entry):
+        _drop_entry(entry, namespace)
+        return None, 0.0
 
     entry["hits"] = entry.get("hits", 0) + 1
     entry["last_hit"] = time.time()
-    r.set(_cache_key(entry["id"], namespace), json.dumps(entry), ex=CACHE_TTL_SECS)
+    r.set(_cache_key(entry["id"], namespace), json.dumps(entry),
+          ex=None if entry.get("verified_by") else CACHE_TTL_SECS)
     log.info(f"EXACT HIT [{_ns(namespace)}] | query='{query[:50]}'")
     return entry, 1.0
 
@@ -773,6 +800,9 @@ def find_semantic_match(query: str, namespace: str = None):
             continue
         # Must have BOTH high similarity AND concept overlap
         if score > best_score and overlap >= 0.5:
+            if not _is_fresh(entry):
+                _drop_entry(entry, namespace)
+                continue
             best_score   = score
             best_entry   = entry
             best_overlap = overlap
@@ -783,7 +813,7 @@ def find_semantic_match(query: str, namespace: str = None):
         r.set(
             _cache_key(best_entry["id"], namespace),
             json.dumps(best_entry),
-            ex=CACHE_TTL_SECS
+            ex=None if best_entry.get("verified_by") else CACHE_TTL_SECS
         )
         log.info(
             f"CACHE HIT | score={best_score:.3f} "
@@ -1173,6 +1203,58 @@ def _trim_history_for_llm(history: list, query: str) -> list:
         })
     return trimmed
 
+def _hit_meta(entry, ns):
+    """Who first asked a cached answer, and whether an admin vouched for it.
+    asked_by is withheld for commons hits — that pool spans projects/chats,
+    and naming who asked would leak what they were working on."""
+    return {"entry_id": entry.get("id"), "cache_ns": ns,
+            "asked_by": entry.get("asked_by") if ns != "commons" else None,
+            "asked_at": entry.get("timestamp"), "verified_by": entry.get("verified_by")}
+
+
+def approve_answer(entry_id, namespace, admin):
+    """Mark a cached answer admin-verified: it stops expiring and hits show
+    who vouched for it. Still dropped if its source files change."""
+    raw = r.get(_cache_key(entry_id, namespace))
+    if not raw:
+        return None
+    entry = json.loads(raw)
+    entry["verified_by"] = str(admin)
+    r.set(_cache_key(entry_id, namespace), json.dumps(entry))
+    r.persist(_exact_key(entry["query"], namespace))
+    return entry["query"]
+
+
+def reject_answer(entry_id, namespace):
+    """Delete a cached answer so the next ask gets a fresh one."""
+    raw = r.get(_cache_key(entry_id, namespace))
+    if not raw:
+        return None
+    entry = json.loads(raw)
+    _drop_entry(entry, namespace)
+    return entry["query"]
+
+
+def ago(ts) -> str:
+    secs = max(0, time.time() - (ts or time.time()))
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= n:
+            return f"{int(secs // n)}{unit} ago"
+    return "just now"
+
+
+def cache_provenance(result, user) -> str:
+    """One plain-text line about where a cached answer came from, or ''."""
+    if not result.get("cached"):
+        return ""
+    bits = []
+    if result.get("verified_by"):
+        bits.append(f"verified by {result['verified_by']}")
+    if result.get("asked_by") and result["asked_by"] != str(user):
+        bits.append(f"first asked by {result['asked_by']} {ago(result.get('asked_at'))}")
+    return " · ".join(bits)
+
+
 # ── Main ask() ───────────────────────────────────────────────
 
 def _resolve_auto_provider():
@@ -1429,8 +1511,10 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
 
     # Step 0 — exact match short-circuit (fast path, no embeddings)
     exact_cached, exact_score = find_exact_match(_cache_query, namespace)
+    _hit_ns = namespace
     if not exact_cached and _shares_commons(namespace):
         exact_cached, exact_score = find_exact_match(_cache_query, "commons")
+        _hit_ns = "commons"
     if exact_cached:
         est_saved = len(query.split()) * 4 + 500
         stats["cache_hits"]       += 1
@@ -1448,13 +1532,16 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
             "hits":           exact_cached["hits"],
             "tokens_saved":   est_saved,
             "cached":         True,
-            "exact":          True
+            "exact":          True,
+            **_hit_meta(exact_cached, _hit_ns),
         }
 
     # Step 1 — semantic cache check (slower, embedding-based)
     cached, score = find_semantic_match(_cache_query, namespace)
+    _hit_ns = namespace
     if not cached and _shares_commons(namespace):
         cached, score = find_semantic_match(_cache_query, "commons")
+        _hit_ns = "commons"
     if cached:
         est_saved = len(query.split()) * 4 + 500
         stats["cache_hits"]       += 1
@@ -1471,7 +1558,8 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
             "original_query": cached["query"],
             "hits":           cached["hits"],
             "tokens_saved":   est_saved,
-            "cached":         True
+            "cached":         True,
+            **_hit_meta(cached, _hit_ns),
         }
 
     # Step 1.5 — SOP / solutions layer (org knowledge before the LLM)
@@ -1615,9 +1703,11 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
         # Only cache self-contained queries
         # Context-dependent queries (e.g. "give me step by step")
         # are useless to cache — they mean nothing without prior context
+        _entry_id = None
         if not is_context_dependent(_cache_query):
-            save_to_cache(_cache_query, answer, model_used, total_toks, namespace, query_had_pii,
-                         share_commons=not _agent_result.get("grounded"))
+            _entry_id = save_to_cache(_cache_query, answer, model_used, total_toks, namespace,
+                                      query_had_pii, share_commons=not _agent_result.get("grounded"),
+                                      user=user, files=_agent_result.get("files_read"))
             log.info(f"Cached new entry: '{query[:50]}'"
                      + (" (project-grounded, not shared to commons)" if _agent_result.get("grounded") else ""))
         else:
@@ -1637,6 +1727,8 @@ def ask(query: str, model: str = "gemini", history: list = None, namespace: str 
             "cached":      False,
             "cached_now":  True,
             "searched_llm": True,
+            "entry_id":    _entry_id,
+            "cache_ns":    namespace,
             "llm_note": ("Not found in company knowledge — answered by AI. "
                          "Verify company-specific details with the relevant team.") if _sop_has_knowledge() else None,
         }
@@ -1679,17 +1771,67 @@ def is_admin(user) -> bool:
     return str(user) in ADMINS
 
 
+# Past /agent runs that actually changed files, per project — a new task
+# that looks like one already solved gets that run's summary as a head
+# start instead of re-exploring from scratch.
+AGENT_MEMORY_MAX = 50
+AGENT_MEMORY_MIN_SIM = float(os.getenv("AGENT_MEMORY_MIN_SIM", "0.75"))
+
+
+def _agent_memory_key(namespace):
+    return f"{CACHE_PREFIX}{_ns(namespace)}:__agent_memory__"
+
+
+def similar_past_fix(task, namespace):
+    """Most similar earlier agent run in this project (cosine >=
+    AGENT_MEMORY_MIN_SIM), or None."""
+    past = [json.loads(x) for x in r.lrange(_agent_memory_key(namespace), 0, -1)]
+    if not past:
+        return None
+    q = np.asarray(embedder.encode(task, convert_to_tensor=False), dtype=np.float32)
+    m = np.asarray([p["embedding"] for p in past], dtype=np.float32)
+    sims = (m @ q) / (np.linalg.norm(m, axis=1) * np.linalg.norm(q) + 1e-9)
+    i = int(np.argmax(sims))
+    return past[i] if sims[i] >= AGENT_MEMORY_MIN_SIM else None
+
+
+def _remember_fix(task, answer, files, user, namespace):
+    key = _agent_memory_key(namespace)
+    r.lpush(key, json.dumps({
+        "task": task, "summary": answer[:1500], "files": files, "user": str(user),
+        "ts": time.time(), "embedding": embedder.encode(task, convert_to_tensor=False).tolist()}))
+    r.ltrim(key, 0, AGENT_MEMORY_MAX - 1)
+
+
 @_budgeted
 def run_agent(task, model, *, user, namespace, **kwargs):
-    """agent.run() plus an audit entry, so /agent work shows up in /usage
-    like any other query (it's usually the most expensive kind)."""
+    """agent.run() plus: an audit entry (so /agent work shows in /usage —
+    it's usually the most expensive kind), and project memory of earlier
+    runs (see similar_past_fix)."""
     _t0 = time.time()
+    root = kwargs.get("root", ".")
 
     def _record(model_used, tokens):
         audit.record(r, user=user, query=f"[agent] {task}", model=model_used,
                      source=_normalize_source(model_used), namespace=namespace,
                      tokens_used=tokens, latency_ms=int((time.time() - _t0) * 1000))
-    return agent.run(task, model, on_usage=_record, **kwargs)
+
+    agent_task = task
+    past = similar_past_fix(task, namespace)
+    if past:
+        if kwargs.get("on_step"):
+            kwargs["on_step"]("reuse_past_fix", {"query": past["task"]})
+        agent_task += (f"\n\n(For reference — a similar task was already done in this project "
+                       f"{ago(past['ts'])} by {past['user']}: \"{past['task']}\". Its summary: "
+                       f"{past['summary']} Files it changed: {', '.join(past['files'])}. Check "
+                       "whether that work already covers this before changing anything, and "
+                       "reuse its approach if it fits.)")
+    answer = agent.run(agent_task, model, on_usage=_record, **kwargs)
+    changed = agent._undo.get(os.path.realpath(root))
+    if changed:
+        _remember_fix(task, answer, sorted(os.path.relpath(p, root) for p in changed),
+                      user, namespace)
+    return answer
 
 
 def usage_report(user) -> str:
@@ -1707,6 +1849,14 @@ def usage_report(user) -> str:
     for name, u in sorted(rows.items(), key=lambda kv: -kv[1]["tokens_used"]):
         lines.append(f"{name:16s} {u['queries']:7d} {u['cache_hits']:6d} {u['llm_calls']:5d} "
                      f"{u['tokens_used']:9d} {u['tokens_saved']:9d} {u['cost_usd']:8.4f}")
+    ref = float(os.getenv("RECALQ_REFERENCE_COST_PER_1K") or max(costs.values(), default=0))
+    if ref:
+        tokens_all = sum(u["tokens_used"] + u["tokens_saved"] for u in rows.values())
+        without = tokens_all * ref / 1000
+        actual = sum(u["cost_usd"] for u in rows.values())
+        lines.append(f"savings: ${without - actual:.4f} — without Recalq every token at "
+                     f"${ref}/1k (your priciest model) would be ${without:.4f}; actual spend "
+                     f"${actual:.4f} (cache hits + free-model routing)")
     if BUDGET_USD:
         lines.append(f"this month you've spent ${audit.month_spend(r, user):.4f} of your "
                      f"${BUDGET_USD:.2f} budget" + (" — free models only until next month"
@@ -1728,7 +1878,8 @@ if __name__ == "__main__":
     # Commands are slash-prefixed so a real question ("what's the status of
     # my order?") can never be mistaken for a built-in command.
     _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
-                  "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage", "/reset"] + [
+                  "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage",
+                  "/approve", "/reject", "/reset"] + [
                   f"/{c}" for c in _plugin_api.commands.keys()]
 
     _TTY = sys.stdout.isatty()
@@ -1767,7 +1918,7 @@ if __name__ == "__main__":
     print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
     print(_RULE)
     print(_c("2", "  /quit /stats /usage /cache /providers /status /add /project /plugins /reset "
-                   "/model <name> /doc <path> /image <path> [q] /agent <task> /undo"))
+                   "/model <name> /doc <path> /image <path> [q] /agent <task> /undo /approve /reject"))
     print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
     print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
     print(_c("2", f"  signed in as '{_cli_user}'" + (" (admin)" if is_admin(_cli_user) else "")))
@@ -1802,6 +1953,7 @@ if __name__ == "__main__":
 
     recent_doc_id = None
     _project_scanned = False
+    _last_answer = (None, None)  # (cache entry id, its namespace) for /approve, /reject
     # Resumed from Redis (same namespace as cache/docs) rather than starting
     # blank each run — a follow-up like "do it" still means something even
     # in a brand-new `./recalq` process, as long as you're in the same project.
@@ -1829,6 +1981,21 @@ if __name__ == "__main__":
             s = get_stats(_cli_namespace)
             print(f"\n📊 queries={s['total_queries']} hits={s['cache_hits']} "
                   f"saved~{s['tokens_saved_est']} llm_calls={s['llm_calls']}\n")
+            continue
+        if user_input in ("/approve", "/reject"):
+            if not is_admin(_cli_user):
+                print("  only admins (RECALQ_ADMINS) can approve or reject answers\n")
+            elif not _last_answer[0]:
+                print("  the last answer isn't in the cache, nothing to approve/reject\n")
+            elif user_input == "/approve":
+                q = approve_answer(*_last_answer, _cli_user)
+                print(f"  ✓ verified: '{q}' — kept permanently, shown as verified to the team\n"
+                      if q else "  that answer is no longer in the cache\n")
+            else:
+                q = reject_answer(*_last_answer)
+                _last_answer = (None, None)
+                print(f"  ✗ removed: '{q}' — the next ask gets a fresh answer\n"
+                      if q else "  that answer is no longer in the cache\n")
             continue
         if user_input == "/usage":
             print("\n" + usage_report(_cli_user) + "\n")
@@ -2035,8 +2202,12 @@ if __name__ == "__main__":
                      namespace=_cli_namespace, user=_cli_user)
         result["answer"] = _plugin_api.run_after(_query, result["answer"])
         src = result["source"]
+        _last_answer = (result.get("entry_id"), result.get("cache_ns"))
         if src == "cache":
             meta = f"⚡ cache hit · sim={result['similarity']} · hits={result['hits']}"
+            _prov = cache_provenance(result, _cli_user)
+            if _prov:
+                meta += f" · {_prov}"
         elif result.get("compositional"):
             meta = (f"🧩 compositional · {result.get('cache_entries_used',0)} cached "
                     f"+ {len(result.get('missing_concepts',[]))} new · intent={result.get('intent')}")

@@ -127,6 +127,17 @@ next); conversations stay per person. Identity is the OS login
   (from `cost_per_1k_tokens` in `client.yaml`). Admins see the whole team.
 - `RECALQ_ADMINS=alice,795445523` in `.env` — who counts as admin.
 - `/undo` — reverts the files the last `/agent` run changed.
+- Cached answers that were based on project files remember those files'
+  hashes; once any of them changes, the answer is dropped instead of
+  served stale.
+- Cache hits say who first asked ("first asked by alice 2d ago") and, if
+  an admin vouched for it, "verified by …". Admins: `/approve` keeps the
+  last answer permanently as verified, `/reject` deletes it.
+- `/agent` remembers runs that changed files, per project; a similar new
+  task starts from that run's summary instead of re-exploring.
+- `/usage` ends with a savings line: what every token would have cost at
+  your priciest model (`RECALQ_REFERENCE_COST_PER_1K` overrides) vs. what
+  was actually spent.
 - `RECALQ_BUDGET_USD=5` — monthly spend cap per person. Over it, they
   still get cache hits and free (cost 0) models, never paid ones.
 - A provider that fails is skipped for `PROVIDER_COOLDOWN` seconds (300)

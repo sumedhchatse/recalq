@@ -61,6 +61,7 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 _chat_model = {}    # chat_id -> provider alias, in-memory only
 _chat_doc = {}      # chat_id -> most recently attached doc_id, in-memory only
 _chat_history = {}  # chat_id -> rolling [{"role","content"}, ...], in-memory only
+_chat_last = {}     # chat_id -> (cache entry id, namespace) of the last answer, for /approve
 _chat_root = {}     # chat_id -> agent working directory, in-memory only (/cd), default = bot's cwd
 
 _offset = 0  # getUpdates cursor; module-level so a confirmation wait (below) can consume
@@ -222,6 +223,7 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
     ns = _telegram_namespace(chat_id)
     if cmd in ("/start", "/help"):
         send(chat_id, "Commands: /model <name> | /providers | /stats | /usage | /cache | /reset | /help\n"
+                       "/approve | /reject — admins: vouch for or remove the last answer.\n"
                        "/cd <path> | /agent <task> | /undo — point the agent at a project directory on "
                        "the server, then have it read/edit files and run shell commands there; "
                        "/undo reverts the files its last run changed.\n"
@@ -267,6 +269,21 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
                            f"(cache/docs/history now scoped to this project)")
         else:
             send(chat_id, f"no such directory: {arg}")
+    elif cmd in ("/approve", "/reject"):
+        entry_id, ens = _chat_last.get(chat_id, (None, None))
+        if not memlayer.is_admin(user_id):
+            send(chat_id, "Only admins (RECALQ_ADMINS) can approve or reject answers.")
+        elif not entry_id:
+            send(chat_id, "The last answer isn't in the cache, nothing to approve or reject.")
+        elif cmd == "/approve":
+            q = memlayer.approve_answer(entry_id, ens, user_id)
+            send(chat_id, f"Verified: '{q}'. Kept permanently and shown as verified to the team."
+                 if q else "That answer is no longer in the cache.")
+        else:
+            q = memlayer.reject_answer(entry_id, ens)
+            _chat_last.pop(chat_id, None)
+            send(chat_id, f"Removed: '{q}'. The next ask gets a fresh answer."
+                 if q else "That answer is no longer in the cache.")
     elif cmd == "/usage":
         send(chat_id, memlayer.usage_report(user_id))
     elif cmd == "/undo":
@@ -376,7 +393,9 @@ def handle_message(msg: dict):
                               recent_doc_id=recent_doc_id, has_attachments=bool(recent_doc_id),
                               root=_chat_root.get(chat_id, os.getcwd()))
         answer = result.get("answer") or "(no answer)"
-        send(chat_id, f"{answer}\n\n— via {result.get('source', '?')}")
+        prov = memlayer.cache_provenance(result, user_id)
+        send(chat_id, f"{answer}\n\n— via {result.get('source', '?')}" + (f" · {prov}" if prov else ""))
+        _chat_last[chat_id] = (result.get("entry_id"), result.get("cache_ns"))
         _push_history(chat_id, text, answer)
     except Exception as e:
         log.error(f"ask() failed: {e}")
