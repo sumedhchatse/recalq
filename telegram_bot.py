@@ -224,9 +224,9 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
     if cmd in ("/start", "/help"):
         send(chat_id, "Commands: /model <name> | /providers | /stats | /usage | /cache | /reset | /help\n"
                        "/approve | /reject — admins: vouch for or remove the last answer.\n"
-                       "/cd <path> | /agent <task> | /undo — point the agent at a project directory on "
+                       "/cd <path> | /agent <task> | /diff | /undo — point the agent at a project directory on "
                        "the server, then have it read/edit files and run shell commands there; "
-                       "/undo reverts the files its last run changed.\n"
+                       "/diff shows what its last run changed, /undo reverts it (repeat to go further back).\n"
                        "Send a PDF/DOCX/TXT to attach it (questions after use it).\n"
                        "Send a photo (with an optional caption) to ask about an image — "
                        "you can ask follow-ups about it afterward.\n"
@@ -286,10 +286,13 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
                  if q else "That answer is no longer in the cache.")
     elif cmd == "/usage":
         send(chat_id, memlayer.usage_report(user_id))
+    elif cmd == "/diff":
+        d = _agent.diff(_chat_root.get(chat_id, os.getcwd()))
+        send(chat_id, d[:3900] if d else "No agent changes to show.")
     elif cmd == "/undo":
         restored = _agent.undo(_chat_root.get(chat_id, os.getcwd()))
         send(chat_id, ("Reverted the last agent run: " + ", ".join(restored))
-             if restored else "Nothing to undo — the last agent run changed no files.")
+             if restored else "Nothing to undo — no agent changes left.")
     elif cmd == "/agent":
         if not arg:
             send(chat_id, "usage: /agent <task>")

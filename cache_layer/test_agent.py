@@ -371,7 +371,7 @@ def test_undo_restores_last_run():
             "R", (), {"choices": [type("C", (), {"message": type(
                 "M", (), {"content": "nothing to do", "tool_calls": None})()})()]})()
         agent.run("noop", "fake-model", root=root, confirm=yes)
-        assert agent.undo(root) == []  # a new run() resets what /undo reverts
+        assert agent.undo(root) == ["b.txt"]  # a run that changed nothing doesn't hide older ones
 
 
 def test_auto_allow_only_plain_matching_commands():
@@ -393,6 +393,73 @@ def test_auto_allow_only_plain_matching_commands():
             assert len(asked) == 1 and out == "user declined this command"
     finally:
         agent.AUTO_ALLOW[:] = []
+
+
+def test_checkpoints_step_back_run_by_run_and_diff():
+    yes = lambda desc: True
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "a.txt")
+        with open(path, "w") as f:
+            f.write("v0\n")
+        for old, new in (("v0", "v1"), ("v1", "v2")):
+            agent._new_checkpoint(root)
+            agent._run_tool("edit_file", {"path": "a.txt", "old_string": old, "new_string": new},
+                            root, yes)
+        d = agent.diff(root)
+        assert "-v1" in d and "+v2" in d, d
+        assert agent.undo(root) == ["a.txt"] and open(path).read() == "v1\n"
+        assert agent.undo(root) == ["a.txt"] and open(path).read() == "v0\n"
+        assert agent.undo(root) == [] and agent.diff(root) == ""
+
+
+def test_trim_context_elides_oldest_tool_output_first():
+    old_max = agent.MAX_CONTEXT_CHARS
+    agent.MAX_CONTEXT_CHARS = 5000
+    try:
+        msgs = [{"role": "system", "content": "s"}] + [
+            {"role": "tool", "tool_call_id": str(i), "content": str(i) * 2000} for i in range(8)]
+        agent._trim_context(msgs)
+        assert msgs[1]["content"].endswith(agent._ELIDED)       # oldest trimmed
+        assert msgs[-1]["content"] == "7" * 2000                # recent kept whole
+        assert sum(len(m["content"]) for m in msgs) <= 5000 + 6 * 2000
+    finally:
+        agent.MAX_CONTEXT_CHARS = old_max
+
+
+def test_project_instructions_reach_the_prompt():
+    seen = []
+    agent.chat_completion = lambda model, messages, max_tokens=800, tools=None, **kw: (
+        seen.append(messages[0]["content"]) or type("R", (), {"choices": [type("C", (), {
+            "message": type("M", (), {"content": "ok", "tool_calls": None})()})()]})())
+    with tempfile.TemporaryDirectory() as root:
+        agent.run("x", "m", root=root)
+        assert "Project instructions" not in seen[-1]
+        with open(os.path.join(root, "AGENTS.md"), "w") as f:
+            f.write("Always run make check.")
+        agent.run("x", "m", root=root)
+        assert "Always run make check." in seen[-1]
+        agent.answer([{"role": "user", "content": "q"}], "m", root=root)
+        assert "Always run make check." in seen[-1]
+
+
+def test_sandbox_runs_without_asking_and_is_isolated():
+    old = agent.SANDBOX
+    agent.SANDBOX = "podman"
+    try:
+        argv = agent._sandbox_argv("pytest", "/tmp")
+        assert argv[:2] == ["podman", "run"] and "--network=none" in argv
+        assert "--userns=keep-id" in argv and argv[-3:] == ["sh", "-c", "pytest"]
+        real_run, calls = agent.subprocess.run, []
+        agent.subprocess.run = lambda argv, **kw: calls.append(argv) or type(
+            "P", (), {"stdout": "ok", "stderr": "", "returncode": 0})()
+        try:
+            out = agent._run_tool("run_shell", {"command": "rm -rf /"}, "/tmp",
+                                  lambda d: (_ for _ in ()).throw(AssertionError("asked")))
+        finally:
+            agent.subprocess.run = real_run
+        assert out == "ok" and calls[0][0] == "podman"
+    finally:
+        agent.SANDBOX = old
 
 
 if __name__ == "__main__":
@@ -418,4 +485,8 @@ if __name__ == "__main__":
     test_read_file_flags_truncation()
     test_undo_restores_last_run()
     test_auto_allow_only_plain_matching_commands()
+    test_checkpoints_step_back_run_by_run_and_diff()
+    test_trim_context_elides_oldest_tool_output_first()
+    test_project_instructions_reach_the_prompt()
+    test_sandbox_runs_without_asking_and_is_isolated()
     print("ok")

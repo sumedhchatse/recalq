@@ -143,6 +143,18 @@ next); conversations stay per person. Identity is the OS login
 - A provider that fails is skipped for `PROVIDER_COOLDOWN` seconds (300)
   and the next cheapest healthy one answers instead. Shared through Redis,
   so the CLI, Telegram bot and MCP server all skip it at once.
+- `/agent` reads `AGENTS.md` (or `RECALQ.md` / `CLAUDE.md`) from the
+  project root — the same file Codex/Claude Code use for project
+  conventions, test commands, and what not to touch.
+- `/diff` shows what the last agent run changed; `/undo` reverts it, and
+  repeating `/undo` steps further back (up to 20 runs, until restart).
+- `AGENT_SANDBOX=podman` (or `docker`) — agent shell commands run in a
+  throwaway container: no network, only the project dir visible, memory
+  and process caps — and so without asking. `AGENT_SANDBOX_IMAGE` picks
+  the image (default `python:3.12-slim`; it needs your project's
+  toolchain). The project dir itself is writable from inside.
+- Long agent runs shrink old tool output past `AGENT_MAX_CONTEXT_CHARS`
+  (100000) so small models don't overflow.
 - `AGENT_AUTO_ALLOW="pytest*,python3 test_*,npm test"` — shell commands
   `/agent` may run without asking (anything with `; & | $ > <` or `..`
   still asks).

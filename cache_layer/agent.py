@@ -300,19 +300,62 @@ def _safe_path(root, path):
     return full
 
 
-# Pre-edit contents of every file the last run() touched, per project root,
-# so /undo can put them back. None = the file didn't exist (undo deletes it).
+# Checkpoints: per project root, a stack with one {path: pre-edit content}
+# dict per run() (None = the file didn't exist, undo deletes it), so /undo
+# can step back run by run like Claude Code's rewind.
+# ponytail: in-process memory — checkpoints don't survive a restart; use
+# git for anything you need to keep.
 _undo = {}
+MAX_CHECKPOINTS = 20
+
+
+def _new_checkpoint(root):
+    stack = _undo.setdefault(os.path.realpath(root), [])
+    stack.append({})
+    del stack[:-MAX_CHECKPOINTS]
 
 
 def _snapshot(root, full, old_content):
-    _undo.setdefault(os.path.realpath(root), {}).setdefault(full, old_content)
+    stack = _undo.setdefault(os.path.realpath(root), [])
+    if not stack:
+        stack.append({})
+    stack[-1].setdefault(full, old_content)
+
+
+def last_changes(root):
+    """{abs path: pre-edit content} for the current/most recent run()."""
+    stack = _undo.get(os.path.realpath(root)) or [{}]
+    return stack[-1]
+
+
+def _latest_nonempty(root):
+    stack = _undo.get(os.path.realpath(root), [])
+    while stack and not stack[-1]:
+        stack.pop()  # runs that changed nothing aren't worth an /undo step
+    return stack
+
+
+def diff(root):
+    """Unified diff of what the most recent file-changing run did, or ''."""
+    stack = _latest_nonempty(root)
+    if not stack:
+        return ""
+    out = []
+    for full, old in sorted(stack[-1].items()):
+        rel = os.path.relpath(full, root)
+        new = open(full).read() if os.path.exists(full) else ""
+        out += difflib.unified_diff((old or "").splitlines(keepends=True),
+                                    new.splitlines(keepends=True),
+                                    fromfile=f"a/{rel}", tofile=f"b/{rel}")
+    return _colorize_diff("".join(out))
 
 
 def undo(root):
-    """Restore every file the last run() in `root` changed. Returns the
-    relative paths restored (empty if there's nothing to undo)."""
-    changes = _undo.pop(os.path.realpath(root), {})
+    """Restore every file the most recent file-changing run() in `root`
+    changed; call again to step further back. Returns the relative paths
+    restored (empty if there's nothing to undo)."""
+    stack = _latest_nonempty(root)
+    changes = stack.pop() if stack else {}
     for full, old in changes.items():
         if old is None:
             if os.path.exists(full):
@@ -330,6 +373,25 @@ def undo(root):
 # through on the "pytest*" pattern.
 AUTO_ALLOW = [p.strip() for p in os.getenv("AGENT_AUTO_ALLOW", "").split(",") if p.strip()]
 _SHELL_CONTROL = re.compile(r"[;&|`$<>\n\\]")
+
+
+# Opt-in sandbox (the Codex model): AGENT_SANDBOX=podman (or docker) runs
+# every run_shell in a throwaway container — no network, only the project
+# dir mounted (read-write, at the same path), memory/process caps — and
+# because of that, without asking. The image needs the project's toolchain.
+SANDBOX = os.getenv("AGENT_SANDBOX", "").strip()
+SANDBOX_IMAGE = os.getenv("AGENT_SANDBOX_IMAGE", "docker.io/library/python:3.12-slim")
+
+
+def _sandbox_argv(command, root):
+    real = os.path.realpath(root)
+    user = (["--userns=keep-id"] if SANDBOX == "podman"
+            else ["--user", f"{os.getuid()}:{os.getgid()}"])
+    # No --cpus: rootless podman usually only gets the memory+pids cgroup
+    # controllers delegated, and asking for cpu makes every run fail.
+    return [SANDBOX, "run", "--rm", "--network=none", "--security-opt", "label=disable",
+            "--memory=2g", "--pids-limit=512", *user,
+            "-v", f"{real}:{real}", "-w", real, SANDBOX_IMAGE, "sh", "-c", command]
 
 
 def _auto_allowed(command):
@@ -390,10 +452,14 @@ def _run_tool(name, args, root, confirm, embedder=None):
             f.write(new_content)
         return f"wrote {args['path']}"
     if name == "run_shell":
-        if not _auto_allowed(args["command"]) and not confirm(_color(33, f"  ⚠ run: {args['command']}")):
-            return "user declined this command"
-        proc = subprocess.run(args["command"], shell=True, cwd=root, capture_output=True,
-                               text=True, timeout=SHELL_TIMEOUT)
+        if SANDBOX:
+            proc = subprocess.run(_sandbox_argv(args["command"], root), capture_output=True,
+                                  text=True, timeout=SHELL_TIMEOUT)
+        else:
+            if not _auto_allowed(args["command"]) and not confirm(_color(33, f"  ⚠ run: {args['command']}")):
+                return "user declined this command"
+            proc = subprocess.run(args["command"], shell=True, cwd=root, capture_output=True,
+                                  text=True, timeout=SHELL_TIMEOUT)
         out = (proc.stdout + proc.stderr)[:8000]
         return out or f"(exit {proc.returncode}, no output)"
     if name == "update_plan":
@@ -437,6 +503,23 @@ def _assistant_msg_dict(msg, tool_calls):
     }
 
 
+MAX_CONTEXT_CHARS = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "100000"))
+_ELIDED = "\n... (older tool output elided to fit the context window — re-run the tool if needed)"
+
+
+def _trim_context(messages, keep_recent=6):
+    """Long runs pile up tool output; small free models then fail on context
+    length. Shrink the OLDEST tool results first, never the recent ones."""
+    total = sum(len(str(m.get("content") or "")) for m in messages)
+    for m in messages[:-keep_recent]:
+        if total <= MAX_CONTEXT_CHARS:
+            break
+        c = str(m.get("content") or "")
+        if m.get("role") == "tool" and len(c) > 400 and not c.endswith(_ELIDED):
+            m["content"] = c[:300] + _ELIDED
+            total -= len(c) - len(m["content"])
+
+
 def _loop(messages, model, root, confirm, on_step, tools, max_steps, max_tokens, embedder=None):
     """Shared tool-use loop: call the model, run whatever tools it asks
     for, feed results back, repeat until it stops calling tools or
@@ -451,6 +534,7 @@ def _loop(messages, model, root, confirm, on_step, tools, max_steps, max_tokens,
     total_tokens = 0
     used_tools = False
     for _ in range(max_steps):
+        _trim_context(messages)
         resp = chat_completion(model, messages, max_tokens=max_tokens, tools=tools)
         model_used = getattr(resp, "model", None) or model_used
         usage = getattr(resp, "usage", None)
@@ -497,6 +581,22 @@ ARCHITECT_MAX_STEPS = 10
 ARCHITECT_MAX_TOKENS = 1200
 
 
+INSTRUCTION_FILES = ("AGENTS.md", "RECALQ.md", "CLAUDE.md")
+
+
+def project_instructions(root):
+    """The project's own agent instructions (conventions, how to run tests,
+    what not to touch) — same files Codex (AGENTS.md) and Claude Code
+    (CLAUDE.md) read, so one file serves every tool. '' if none."""
+    for name in INSTRUCTION_FILES:
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            with open(path, errors="ignore") as f:
+                return (f"\n\nProject instructions from {name} — follow them:\n"
+                        f"{f.read()[:8000]}")
+    return ""
+
+
 def _plan(task, history, architect_model, root, on_step, embedder):
     """Read-only planning pass (the Aider 'architect' technique): a
     (usually stronger) model explores the project and writes a concrete
@@ -507,7 +607,8 @@ def _plan(task, history, architect_model, root, on_step, embedder):
             f"You are a senior engineer planning a change in {os.path.abspath(root)}. Explore "
             "with search_code/read_file/list_dir as needed, then write a concise, concrete plan: "
             "exactly which file(s) to change and what the change should be. Do not write any "
-            "code yourself, just the plan — someone else will execute it."},
+            "code yourself, just the plan — someone else will execute it."
+            + project_instructions(root)},
         *(history or []),
         {"role": "user", "content": task},
     ]
@@ -534,7 +635,7 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
     history, if given, is the conversation so far
     ([{"role","content"}, ...], already trimmed by the caller) — without
     it, a follow-up like "do it" has no idea what "it" refers to."""
-    _undo.pop(os.path.realpath(root), None)  # /undo reverts the latest run only
+    _new_checkpoint(root)
     plan = _plan(task, history, architect_model, root, on_step, embedder) if architect_model else None
     plan_context = (f"\n\nA plan has already been made for this task:\n{plan}\n\nExecute it "
                     "precisely — re-read a file first if you need its exact current contents "
@@ -557,8 +658,10 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
             "with a short summary and make no further tool calls — and be precise in that "
             "summary: a write_file/edit_file/run_shell result of 'user declined this write/edit/"
             "command' means that change was NOT applied. Never describe a declined or failed "
-            "change as done, addressed, or fixed; say plainly it wasn't applied and why."
-            f"{plan_context}"},
+            "change as done, addressed, or fixed; say plainly it wasn't applied and why. "
+            + ("Shell commands run in an isolated sandbox with no network access — don't try "
+               "to install packages or reach the internet. " if SANDBOX else "")
+            + f"{plan_context}" + project_instructions(root)},
         *(history or []),
         {"role": "user", "content": task},
     ]
@@ -597,7 +700,7 @@ def answer(messages, model, root=".", max_steps=10, max_tokens=800, on_step=None
         "claim you did it or describe changes as if you made them — you would be lying, since "
         "it is not possible. Instead say plainly that you can only describe what should change "
         "from here, and that they need to ask again as an action (e.g. 'fix the bug in x.py') "
-        "or use /agent to actually have it applied."}
+        "or use /agent to actually have it applied." + project_instructions(root)}
     convo = [exploring] + list(messages)
     answer_text, model_used, total_tokens, grounded = _loop(
         convo, model, root, None, on_step, READONLY_TOOLS, max_steps, max_tokens, embedder)

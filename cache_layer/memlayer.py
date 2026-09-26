@@ -1827,7 +1827,7 @@ def run_agent(task, model, *, user, namespace, **kwargs):
                        "whether that work already covers this before changing anything, and "
                        "reuse its approach if it fits.)")
     answer = agent.run(agent_task, model, on_usage=_record, **kwargs)
-    changed = agent._undo.get(os.path.realpath(root))
+    changed = agent.last_changes(root)
     if changed:
         _remember_fix(task, answer, sorted(os.path.relpath(p, root) for p in changed),
                       user, namespace)
@@ -1879,7 +1879,7 @@ if __name__ == "__main__":
     # my order?") can never be mistaken for a built-in command.
     _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
                   "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage",
-                  "/approve", "/reject", "/reset"] + [
+                  "/approve", "/reject", "/diff", "/reset"] + [
                   f"/{c}" for c in _plugin_api.commands.keys()]
 
     _TTY = sys.stdout.isatty()
@@ -1918,7 +1918,7 @@ if __name__ == "__main__":
     print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
     print(_RULE)
     print(_c("2", "  /quit /stats /usage /cache /providers /status /add /project /plugins /reset "
-                   "/model <name> /doc <path> /image <path> [q] /agent <task> /undo /approve /reject"))
+                   "/model <name> /doc <path> /image <path> [q] /agent <task> /diff /undo /approve /reject"))
     print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
     print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
     print(_c("2", f"  signed in as '{_cli_user}'" + (" (admin)" if is_admin(_cli_user) else "")))
@@ -2151,10 +2151,14 @@ if __name__ == "__main__":
             history.append({"role": "assistant", "content": result["answer"]})
             _persist_history()
             continue
+        if user_input == "/diff":
+            d = _agent.diff(os.getcwd())
+            print(("\n" + d + "\n") if d else "  no agent changes to show\n")
+            continue
         if user_input == "/undo":
             restored = _agent.undo(os.getcwd())
             print(f"  reverted: {', '.join(restored)}\n" if restored
-                  else "  nothing to undo — the last agent run changed no files\n")
+                  else "  nothing to undo — no agent changes left in this session\n")
             continue
         if user_input.startswith("/agent "):
             _run_agent_and_print(user_input.split(" ", 1)[1].strip())
