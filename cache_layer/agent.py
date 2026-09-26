@@ -307,7 +307,10 @@ def _run_tool(name, args, root, confirm, embedder=None):
     if name == "read_file":
         full = _safe_path(root, args["path"])
         with open(full) as f:
-            return f.read()[:20000]
+            content = f.read()
+        if len(content) > 20000:
+            return content[:20000] + f"\n... (truncated, {len(content) - 20000} more chars)"
+        return content
     if name == "list_dir":
         full = _safe_path(root, args.get("path", "."))
         return "\n".join(sorted(os.listdir(full)))

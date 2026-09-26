@@ -333,6 +333,21 @@ def test_web_fetch_blocks_private_addresses():
         assert agent._is_safe_url(url) is False, url
 
 
+def test_read_file_flags_truncation():
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "big.txt")
+        with open(path, "w") as f:
+            f.write("x" * 25000)
+        result = agent._run_tool("read_file", {"path": "big.txt"}, root, None)
+        assert result.startswith("x" * 20000)
+        assert "truncated, 5000 more chars" in result
+
+        with open(os.path.join(root, "small.txt"), "w") as f:
+            f.write("hello")
+        result = agent._run_tool("read_file", {"path": "small.txt"}, root, None)
+        assert result == "hello", result
+
+
 if __name__ == "__main__":
     test_write_file_then_stop()
     test_write_declined()
@@ -353,4 +368,5 @@ if __name__ == "__main__":
     test_grep_code_invalid_pattern_errors_cleanly()
     test_web_fetch_disabled_by_default()
     test_web_fetch_blocks_private_addresses()
+    test_read_file_flags_truncation()
     print("ok")
