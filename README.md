@@ -100,10 +100,29 @@ Stop it:
 kill $(cat ~/memlayer/.telegram.pid)
 ```
 
-### MCP (use it as a tool from Claude Code)
+### MCP — Claude Code, Cursor, VS Code, any MCP client
 
+The MCP server gives an IDE's own agent Recalq's shared team cache,
+project-grounded answers and ingested docs (tools: `recalq_ask`,
+`recalq_ingest_document`, `recalq_scan_project`, `recalq_ask_image`).
+Use the venv's python so dependencies resolve.
+
+Claude Code:
 ```
-claude mcp add recalq -- python3 ~/memlayer/recalq_mcp.py
+claude mcp add recalq -- ~/memlayer/.venv/bin/python3 ~/memlayer/recalq_mcp.py
+```
+
+Cursor — `~/.cursor/mcp.json`:
+```json
+{"mcpServers": {"recalq": {"command": "/home/you/memlayer/.venv/bin/python3",
+                           "args": ["/home/you/memlayer/recalq_mcp.py"]}}}
+```
+
+VS Code (Copilot agent mode) — `.vscode/mcp.json` in your project:
+```json
+{"servers": {"recalq": {"type": "stdio",
+                        "command": "/home/you/memlayer/.venv/bin/python3",
+                        "args": ["/home/you/memlayer/recalq_mcp.py"]}}}
 ```
 
 ### Slack / Teams — opt-in, not yet built
@@ -147,7 +166,7 @@ next); conversations stay per person. Identity is the OS login
   project root — the same file Codex/Claude Code use for project
   conventions, test commands, and what not to touch.
 - `/diff` shows what the last agent run changed; `/undo` reverts it, and
-  repeating `/undo` steps further back (up to 20 runs, until restart).
+  repeating `/undo` steps further back (up to 20 runs).
 - `AGENT_SANDBOX=podman` (or `docker`) — agent shell commands run in a
   throwaway container: no network, only the project dir visible, memory
   and process caps — and so without asking. `AGENT_SANDBOX_IMAGE` picks
@@ -155,6 +174,14 @@ next); conversations stay per person. Identity is the OS login
   toolchain). The project dir itself is writable from inside.
 - Long agent runs shrink old tool output past `AGENT_MAX_CONTEXT_CHARS`
   (100000) so small models don't overflow.
+- `agent_provider:` in `client.yaml` — model for `/agent` (default
+  `gemini_flash`), separate from the chat model; `/model` overrides it.
+- `/agent` can hand read-only investigations to `explore` sub-agents,
+  each with its own fresh context; several run in parallel, and
+  read-only tool calls in the same turn run concurrently too.
+- Checkpoints are saved under `~/.recalq/checkpoints/`
+  (`AGENT_CHECKPOINT_DIR`), so `/undo` works after a restart and across
+  the CLI and Telegram.
 - `AGENT_AUTO_ALLOW="pytest*,python3 test_*,npm test"` — shell commands
   `/agent` may run without asking (anything with `; & | $ > <` or `..`
   still asks).

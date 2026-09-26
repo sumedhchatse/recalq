@@ -13,9 +13,11 @@ import time
 import json
 import socket
 import difflib
+import hashlib
 import fnmatch
 import ipaddress
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import numpy as np
@@ -271,6 +273,16 @@ TOOLS = [
             "command": {"type": "string"}},
             "required": ["command"]}}},
     {"type": "function", "function": {
+        "name": "explore",
+        "description": "Hand a read-only investigation to a sub-agent with its own fresh "
+                        "context; it searches/reads the project and returns only its findings. "
+                        "Use it for broad questions (how X is wired, every place Y is used and "
+                        "why) so your own context stays small. Call it several times in one turn "
+                        "for independent questions — they run in parallel.",
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string", "description": "What to find out, self-contained"}},
+            "required": ["question"]}}},
+    {"type": "function", "function": {
         "name": "update_plan",
         "description": "Report your current step-by-step plan and progress on a multi-step task, "
                         "so the user can see what you're doing. Call once near the start with the "
@@ -302,34 +314,63 @@ def _safe_path(root, path):
 
 # Checkpoints: per project root, a stack with one {path: pre-edit content}
 # dict per run() (None = the file didn't exist, undo deletes it), so /undo
-# can step back run by run like Claude Code's rewind.
-# ponytail: in-process memory — checkpoints don't survive a restart; use
-# git for anything you need to keep.
+# can step back run by run like Claude Code's rewind. Mirrored to a JSON
+# file per project under CHECKPOINT_DIR so they survive a restart and are
+# shared by the CLI and Telegram bot.
 _undo = {}
 MAX_CHECKPOINTS = 20
+CHECKPOINT_DIR = os.path.expanduser(os.getenv("AGENT_CHECKPOINT_DIR", "~/.recalq/checkpoints"))
+
+
+def _ckpt_file(real_root):
+    return os.path.join(CHECKPOINT_DIR, hashlib.sha256(real_root.encode()).hexdigest()[:16] + ".json")
+
+
+def _stack(root):
+    real = os.path.realpath(root)
+    if real not in _undo:
+        try:
+            with open(_ckpt_file(real)) as f:
+                _undo[real] = json.load(f)
+        except (OSError, ValueError):
+            _undo[real] = []
+    return _undo[real]
+
+
+def _save_stack(root):
+    real = os.path.realpath(root)
+    try:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        tmp = _ckpt_file(real) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_undo.get(real, []), f)
+        os.replace(tmp, _ckpt_file(real))
+    except OSError:
+        pass  # checkpoints are a convenience; never fail an edit over them
 
 
 def _new_checkpoint(root):
-    stack = _undo.setdefault(os.path.realpath(root), [])
+    stack = _stack(root)
     stack.append({})
     del stack[:-MAX_CHECKPOINTS]
+    _save_stack(root)
 
 
 def _snapshot(root, full, old_content):
-    stack = _undo.setdefault(os.path.realpath(root), [])
+    stack = _stack(root)
     if not stack:
         stack.append({})
     stack[-1].setdefault(full, old_content)
+    _save_stack(root)
 
 
 def last_changes(root):
     """{abs path: pre-edit content} for the current/most recent run()."""
-    stack = _undo.get(os.path.realpath(root)) or [{}]
-    return stack[-1]
+    return (_stack(root) or [{}])[-1]
 
 
 def _latest_nonempty(root):
-    stack = _undo.get(os.path.realpath(root), [])
+    stack = _stack(root)
     while stack and not stack[-1]:
         stack.pop()  # runs that changed nothing aren't worth an /undo step
     return stack
@@ -356,6 +397,7 @@ def undo(root):
     restored (empty if there's nothing to undo)."""
     stack = _latest_nonempty(root)
     changes = stack.pop() if stack else {}
+    _save_stack(root)
     for full, old in changes.items():
         if old is None:
             if os.path.exists(full):
@@ -402,7 +444,12 @@ def _auto_allowed(command):
                for pat in AUTO_ALLOW)
 
 
-def _run_tool(name, args, root, confirm, embedder=None):
+PARALLEL_SAFE = {"search_code", "grep_code", "read_file", "list_dir", "explore", "web_fetch"}
+MAX_PARALLEL = 4
+EXPLORE_MAX_STEPS = 8
+
+
+def _run_tool(name, args, root, confirm, embedder=None, model=None):
     if name == "search_code":
         return search_code(root, embedder, args["query"])
     if name == "grep_code":
@@ -462,6 +509,12 @@ def _run_tool(name, args, root, confirm, embedder=None):
                                   text=True, timeout=SHELL_TIMEOUT)
         out = (proc.stdout + proc.stderr)[:8000]
         return out or f"(exit {proc.returncode}, no output)"
+    if name == "explore":
+        # A sub-agent: fresh context, read-only tools, returns only its
+        # findings — the caller's context never sees the files it read.
+        found = answer([{"role": "user", "content": args["question"]}], model, root,
+                       max_steps=EXPLORE_MAX_STEPS, max_tokens=1200, embedder=embedder)
+        return found["answer"]
     if name == "update_plan":
         return "plan noted"  # purely a display mechanism (see on_step) — no state to keep
     if name == "web_fetch":
@@ -547,19 +600,31 @@ def _loop(messages, model, root, confirm, on_step, tools, max_steps, max_tokens,
             return (msg.content or "(no response)"), model_used, total_tokens, used_tools
         used_tools = True
         messages.append(_assistant_msg_dict(msg, tool_calls))
+        calls = []
         for tc in tool_calls:
-            name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            calls.append((tc, tc.function.name, args))
             if on_step:
-                on_step(name, args)
+                on_step(tc.function.name, args)
+
+        def _exec(call):
+            _tc, name, args = call
             try:
-                result = _run_tool(name, args, root, confirm, embedder)
+                return str(_run_tool(name, args, root, confirm, embedder, model=model))
             except Exception as e:
-                result = f"error: {e}"
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+                return f"error: {e}"
+        # Several read-only calls in one turn (e.g. three explore sub-agents)
+        # run concurrently; anything that writes or may prompt stays in order.
+        if len(calls) > 1 and all(name in PARALLEL_SAFE for _, name, _ in calls):
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
+                results = list(pool.map(_exec, calls))
+        else:
+            results = [_exec(c) for c in calls]
+        for (tc, _, _), result in zip(calls, results):
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
     # Hit the step cap mid-exploration — everything read so far is still in
     # `messages`, so force one last call instead of dropping it all on the
     # floor with a dead-end placeholder. Omitting `tools` alone isn't a
@@ -650,7 +715,9 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
             "replace, not a full resend, so it can't accidentally clobber parts you didn't mean "
             "to touch. Reserve write_file for new files or deliberate full rewrites. For a task "
             "with several distinct steps, call update_plan so progress is visible; skip it for "
-            "something short. Keep changes minimal and scoped to the request. After changing code, "
+            "something short. Keep changes minimal and scoped to the request: change only what the "
+            "task asks for. If you notice other bugs or improvements along the way, list them "
+            "in your summary instead of fixing them. After changing code, "
             "if the project has tests (test_*.py, a tests/ dir, package.json test script, "
             "Makefile test target, ...), run the relevant ones with run_shell; if they fail "
             "because of your change, fix it and re-run until they pass or you're sure the "

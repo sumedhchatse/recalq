@@ -206,7 +206,8 @@ def _run_agent(chat_id, user_id, task):
     root = _chat_root.get(chat_id, os.getcwd())
     send(chat_id, f"\U0001f916 agent working in {root} ...")
     try:
-        answer = memlayer.run_agent(task, _chat_model.get(chat_id, memlayer.default_model()),
+        answer = memlayer.run_agent(task, _chat_model.get(chat_id) or memlayer.agent_provider()
+                                    or memlayer.default_model(),
                              user=user_id, namespace=_telegram_namespace(chat_id),
                              root=root, confirm=_telegram_confirm(chat_id, user_id),
                              on_step=_telegram_on_step(chat_id), embedder=memlayer.embedder,

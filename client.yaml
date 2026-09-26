@@ -186,6 +186,14 @@ providers:
 # ── Which provider is the default choice ────────────────────────
 auto_provider: groq
 
+# ── Model for /agent (optional) ─────────────────────────────────
+# /agent edits code and runs commands, so it's worth a more reliable model
+# than everyday chat. 2026-09-26 comparison on a "fix only add()" task:
+# gemini_flash, groq and nvidia_nemotron-3-super all stayed in scope and
+# ran the tests; gemini (flash-lite) also "fixed" a function it wasn't
+# asked to. /model in a session overrides this.
+agent_provider: gemini_flash
+
 # ── Architect mode for /agent (optional, off by default) ─────────
 # When set, /agent runs a two-pass "architect" flow (the technique Aider
 # popularized): this provider explores the project and writes a plan FIRST

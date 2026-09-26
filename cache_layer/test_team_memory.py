@@ -9,6 +9,8 @@ import memlayer
 import audit
 import agent
 
+agent.CHECKPOINT_DIR = tempfile.mkdtemp()
+
 NS = "test_memory_" + memlayer.hashlib.sha256(str(memlayer.time.time()).encode()).hexdigest()[:6]
 
 

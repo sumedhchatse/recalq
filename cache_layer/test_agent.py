@@ -4,6 +4,9 @@ import os
 import tempfile
 import agent
 
+agent.CHECKPOINT_DIR = tempfile.mkdtemp()  # never touch the real ~/.recalq during tests
+agent.SANDBOX = ""  # litellm auto-loads .env; tests that want the sandbox set it themselves
+
 
 def test_write_file_then_stop():
     calls = {"n": 0}
@@ -462,6 +465,54 @@ def test_sandbox_runs_without_asking_and_is_isolated():
         agent.SANDBOX = old
 
 
+def test_checkpoints_survive_restart():
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "a.txt"), "w") as f:
+            f.write("v0")
+        agent._new_checkpoint(root)
+        agent._run_tool("edit_file", {"path": "a.txt", "old_string": "v0", "new_string": "v1"},
+                        root, lambda d: True)
+        agent._undo.clear()  # simulate a new process
+        assert agent.undo(root) == ["a.txt"] and open(os.path.join(root, "a.txt")).read() == "v0"
+        agent._undo.clear()
+        assert agent.undo(root) == []  # the undo itself was persisted too
+
+
+def test_explore_subagents_run_in_parallel_with_fresh_context():
+    import threading
+    active, peak, lock = [0], [0], threading.Lock()
+    main_turns = []
+
+    def resp(content=None, calls=None):
+        msg = type("M", (), {"content": content, "tool_calls": calls})()
+        return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+    def call(i, q):
+        return type("TC", (), {"id": str(i), "function": type("F", (), {
+            "name": "explore", "arguments": '{"question": "%s"}' % q})()})()
+
+    def fake(model, messages, max_tokens=800, tools=None, **kw):
+        if messages[0]["content"].startswith("You are a coding agent"):  # main agent
+            main_turns.append(messages)
+            if len(main_turns) == 1:
+                return resp(calls=[call(1, "where is auth"), call(2, "where is billing")])
+            return resp(content="done")
+        with lock:  # a sub-agent: fresh context = just its own system prompt + question
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        assert len(messages) == 2 and messages[1]["content"].startswith("where is"), messages
+        agent.time.sleep(0.3)
+        with lock:
+            active[0] -= 1
+        return resp(content="found in " + messages[1]["content"][9:] + ".py")
+    agent.chat_completion = fake
+    with tempfile.TemporaryDirectory() as root:
+        assert agent.run("x", "m", root=root) == "done"
+    assert peak[0] == 2, peak  # both sub-agents ran at the same time
+    tool_msgs = [m["content"] for m in main_turns[1] if m.get("role") == "tool"]
+    assert tool_msgs == ["found in auth.py", "found in billing.py"], tool_msgs  # order kept
+
+
 if __name__ == "__main__":
     test_write_file_then_stop()
     test_write_declined()
@@ -489,4 +540,6 @@ if __name__ == "__main__":
     test_trim_context_elides_oldest_tool_output_first()
     test_project_instructions_reach_the_prompt()
     test_sandbox_runs_without_asking_and_is_isolated()
+    test_checkpoints_survive_restart()
+    test_explore_subagents_run_in_parallel_with_fresh_context()
     print("ok")

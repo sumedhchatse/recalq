@@ -21,7 +21,7 @@ import numpy as np
 from guardrails import check_query, check_answer
 from providers import (chat_completion, default_model, list_providers, cooldowns,
                        provider_status, add_provider, save_api_key, architect_provider,
-                       use_redis, free_only, provider_registry)
+                       use_redis, free_only, provider_registry, agent_provider)
 import agent
 import audit
 import sop_layer
@@ -1927,6 +1927,7 @@ if __name__ == "__main__":
     print(_RULE)
     print()
     model = default_model()
+    _model_chosen = False  # True after /model — then /agent uses it too, not agent_provider
 
     def _run_agent_and_print(task):
         print()
@@ -1940,7 +1941,10 @@ if __name__ == "__main__":
                 return
             preview = args.get("path") or args.get("command") or args.get("query") or args.get("pattern") or args.get("url", "")
             print(_c("33", f"  → {name} {preview}"))
-        answer = run_agent(task, model, user=_cli_user, namespace=_cli_namespace,
+        _agent_model = model if _model_chosen else (agent_provider() or model)
+        if _agent_model != model:
+            print(_c("2", f"  (agent uses {_agent_model} — client.yaml agent_provider; /model overrides)"))
+        answer = run_agent(task, _agent_model, user=_cli_user, namespace=_cli_namespace,
                            root=os.getcwd(), on_step=_on_step, embedder=embedder,
                            architect_model=architect_provider(), history=history)
         print()
@@ -2091,6 +2095,7 @@ if __name__ == "__main__":
             continue
         if user_input.startswith("/model "):
             model = user_input.split(" ",1)[1].strip()
+            _model_chosen = True
             print(f"Model: {model}\n")
             continue
         if user_input == "/project":

@@ -49,10 +49,11 @@ def _load_providers():
         return {}, None, None
     with open(_CLIENT_YAML) as f:
         cfg = yaml.safe_load(f) or {}
-    return cfg.get("providers", {}) or {}, cfg.get("auto_provider"), cfg.get("architect_provider")
+    return (cfg.get("providers", {}) or {}, cfg.get("auto_provider"), cfg.get("architect_provider"),
+            cfg.get("agent_provider"))
 
 
-_PROVIDERS, _AUTO, _ARCHITECT = _load_providers()
+_PROVIDERS, _AUTO, _ARCHITECT, _AGENT = _load_providers()
 
 
 def default_model() -> str:
@@ -68,6 +69,15 @@ def architect_provider() -> str:
     opt-in, off by default so it never silently adds cost."""
     if _ARCHITECT and _ARCHITECT in _PROVIDERS and _PROVIDERS[_ARCHITECT].get("enabled"):
         return _ARCHITECT
+    return None
+
+
+def agent_provider() -> str:
+    """Alias /agent runs on (client.yaml `agent_provider`), or None to use
+    the chat model — lets chat stay on a free model while code changes go
+    to a stronger one."""
+    if _AGENT and _AGENT in _PROVIDERS and _PROVIDERS[_AGENT].get("enabled"):
+        return _AGENT
     return None
 
 
@@ -148,7 +158,7 @@ def add_provider(alias: str, provider_type: str, model: str, api_key_env: str = 
                  cost_per_1k_tokens: float = 0.0):
     """Append a new provider block to client.yaml and make it usable
     immediately in this process (no restart) by reloading the registry."""
-    global _PROVIDERS, _AUTO, _ARCHITECT
+    global _PROVIDERS, _AUTO, _ARCHITECT, _AGENT
     if alias in _PROVIDERS:
         raise ValueError(f"'{alias}' already exists in client.yaml")
 
@@ -172,7 +182,7 @@ def add_provider(alias: str, provider_type: str, model: str, api_key_env: str = 
     with open(_CLIENT_YAML, "w") as f:
         f.write(content)
 
-    _PROVIDERS, _AUTO, _ARCHITECT = _load_providers()
+    _PROVIDERS, _AUTO, _ARCHITECT, _AGENT = _load_providers()
 
 
 def save_api_key(env_var: str, value: str):
