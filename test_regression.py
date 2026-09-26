@@ -11,8 +11,7 @@ Uses a dedicated 'test_regr' namespace; cleans up after itself.
 Does NOT touch your real cache/users.
 """
 import sys, os, json
-sys.path.insert(0, os.path.expanduser("~/memlayer/cache_layer"))
-sys.path.insert(0, os.path.expanduser("~/memlayer/ui"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_layer"))
 
 import memlayer as m
 import pytest

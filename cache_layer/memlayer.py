@@ -32,7 +32,11 @@ import sop_layer
 # warnings and errors — an interactive CLI or a chat bot shouldn't be
 # scrolled past by "cache miss" / "LiteLLM completion()" noise on every
 # turn; that detail is still there in the log file if you need to debug.
-_file_handler = logging.FileHandler(os.path.expanduser("~/memlayer/memlayer.log"))
+# Per user (RECALQ_LOG overrides): on a shared install every teammate runs
+# their own process, and the install dir isn't theirs to write to.
+_LOG_PATH = os.path.expanduser(os.getenv("RECALQ_LOG") or "~/.recalq/memlayer.log")
+os.makedirs(os.path.dirname(_LOG_PATH), mode=0o700, exist_ok=True)
+_file_handler = logging.FileHandler(_LOG_PATH)
 _file_handler.setLevel(logging.INFO)
 _console_handler = logging.StreamHandler()
 _console_handler.setLevel(logging.WARNING)
@@ -48,7 +52,7 @@ REDIS_HOST        = os.getenv("REDIS_HOST")        or "localhost"
 REDIS_PORT        = int(os.getenv("REDIS_PORT")    or 6379)
 REDIS_PASSWORD    = os.getenv("REDIS_PASSWORD")
 SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF") or "0.78")
-CACHE_TTL_SECS    = int(os.getenv("CACHE_TTL"))
+CACHE_TTL_SECS    = int(os.getenv("CACHE_TTL") or 31536000)  # 1 year
 CACHE_PREFIX      = "ml:v1:"
 
 # Universal engine config

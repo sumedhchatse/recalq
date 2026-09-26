@@ -8,7 +8,7 @@ Run: cd ~/memlayer && source .venv/bin/activate && python3 wedge_test.py
 Uses namespace 'wedge_test', cleans up after.
 """
 import sys, os
-sys.path.insert(0, os.path.expanduser("~/memlayer/cache_layer"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_layer"))
 import memlayer as m
 
 NS = "wedge_test"

@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
-MDIR="$HOME/memlayer"
+MDIR="$(cd "$(dirname "$0")" && pwd)"
 echo "🚀 Starting MemLayer..."
+
+set -a; source "$MDIR/.env"; set +a
 
 # Start containers
 cd "$MDIR"
@@ -10,7 +12,7 @@ podman-compose --env-file .env -f podman-compose.yml up -d
 # Wait for Redis
 echo "⏳ Waiting for Redis..."
 for i in {1..20}; do
-  podman exec memlayer_redis_1 redis-cli -a memlayer_redis_pass ping &>/dev/null && break
+  podman exec memlayer_redis_1 redis-cli -a "$REDIS_PASSWORD" ping &>/dev/null && break
   sleep 1
 done
 echo "✅ Redis ready"
@@ -41,5 +43,5 @@ echo "✅ MemLayer backend running:"
 echo "   Embeddings→ http://localhost:8081"
 echo ""
 echo "   Start the CLI → ./recalq"
-echo "   Logs           → tail -f ~/memlayer/memlayer.log"
-echo "   Stop backend   → ~/memlayer/stop.sh"
+echo "   Logs           → tail -f ~/.recalq/memlayer.log"
+echo "   Stop backend   → $MDIR/stop.sh"

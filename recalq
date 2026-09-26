@@ -8,7 +8,7 @@ No web UI, no license check, no proxy server: bring your own API key
 import os
 import sys
 
-_here = os.path.dirname(os.path.abspath(__file__))
+_here = os.path.dirname(os.path.realpath(__file__))  # realpath: works via a /usr/local/bin symlink
 _venv_python = os.path.join(_here, ".venv", "bin", "python3")
 _python = _venv_python if os.path.exists(_venv_python) else sys.executable
 if sys.argv[1:2] == ["test"]:

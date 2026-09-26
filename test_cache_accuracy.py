@@ -10,7 +10,7 @@ Run:  cd ~/memlayer && source .venv/bin/activate && python3 test_cache_accuracy.
 Uses a dedicated 'test_accuracy' namespace so your real cache is untouched.
 """
 import sys, os
-sys.path.insert(0, os.path.expanduser("~/memlayer/cache_layer"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_layer"))
 import memlayer as m
 
 NS = "test_accuracy"

@@ -9,7 +9,7 @@ RECALQ = plain + concept-overlap + polarity/negation awareness
 Run: cd ~/memlayer && source .venv/bin/activate && python3 benchmark_vs_plain.py
 """
 import sys, os, numpy as np
-sys.path.insert(0, os.path.expanduser("~/memlayer/cache_layer"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_layer"))
 import memlayer as m
 
 NS = "benchmark"
