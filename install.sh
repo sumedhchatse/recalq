@@ -6,6 +6,7 @@
 #   ./install.sh --prefix ~/recalq   # somewhere you own
 #   ./install.sh --no-services       # files + venv only, start things yourself
 #   ./install.sh --venv PATH         # reuse an existing virtualenv
+#   ./install.sh --projects DIR      # where the Telegram bot's agent starts (default: $HOME)
 #
 # Services run as systemd --user units of whoever installs (no root needed):
 # recalq-redis, recalq-embed, and recalq-telegram if a bot token is set.
@@ -16,16 +17,19 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 PREFIX=/opt/recalq
 VENV=""
 SERVICES=1
+PROJECTS="$HOME"
 while [ $# -gt 0 ]; do
   case "$1" in
     --prefix) PREFIX="$2"; shift 2 ;;
     --venv) VENV="$2"; shift 2 ;;
     --no-services) SERVICES=0; shift ;;
+    --projects) PROJECTS="$2"; shift 2 ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 PREFIX="$(realpath -m "$PREFIX")"
+PROJECTS="$(realpath -m "$PROJECTS")"
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -59,13 +63,26 @@ if [ -n "$VENV" ]; then
   [ -e "$PREFIX/.venv" ] && [ ! -L "$PREFIX/.venv" ] && die "$PREFIX/.venv exists — remove it to use --venv"
   ln -sfn "$(realpath "$VENV")" "$PREFIX/.venv"
 elif [ ! -x "$PREFIX/.venv/bin/python3" ]; then
+  python3 -c 'import ensurepip' 2>/dev/null || die "python3 can't create virtualenvs. Install it, then re-run:
+     Ubuntu/Debian:  sudo apt install python3-venv
+     RHEL/Rocky:     sudo dnf install python3-pip"
   say "creating virtualenv"
   python3 -m venv "$PREFIX/.venv"
 fi
 PY="$PREFIX/.venv/bin/python3"
-say "installing Python packages (first install downloads a few GB: torch + friends)"
 "$PY" -m pip install -q --upgrade pip
-"$PY" -m pip install -q -r "$PREFIX/requirements.txt"
+REQ="$PREFIX/requirements.txt"
+if ! command -v nvidia-smi >/dev/null && ! "$PY" -c "import torch" 2>/dev/null; then
+  # No GPU: the CPU build of torch is ~200 MB instead of ~3 GB of CUDA
+  # libraries that would never be used (embeddings run fine on CPU).
+  say "no GPU found — installing CPU-only torch"
+  "$PY" -m pip install -q "$(grep '^torch==' "$REQ")" --index-url https://download.pytorch.org/whl/cpu
+  REQ="$(mktemp)"; grep -vE '^(nvidia-|triton)' "$PREFIX/requirements.txt" > "$REQ"
+fi
+say "installing Python packages"
+"$PY" -m pip install -q -r "$REQ"
+
+mkdir -p "$PREFIX/data/redis"   # gitignored, so not in the archive; the Redis bind mount needs it
 
 # ── 5. settings ──────────────────────────────────────────────
 if [ ! -f "$PREFIX/.env" ]; then
@@ -132,7 +149,9 @@ After=recalq-redis.service recalq-embed.service
 Requires=recalq-redis.service
 
 [Service]
-WorkingDirectory=$PREFIX
+# The bot's agent starts here (until /cd) — a projects dir, never the
+# install itself, so an unqualified /agent can't edit Recalq's own code.
+WorkingDirectory=$PROJECTS
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$PREFIX/.env
 ExecStart=$PY $PREFIX/telegram_bot.py
