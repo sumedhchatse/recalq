@@ -142,6 +142,8 @@ ingested docs (a question one person already paid for is free for the
 next); conversations stay per person. Identity is the OS login
 (`RECALQ_USER` overrides it) or the Telegram user id.
 
+- `./recalq test` — runs the whole test suite (needs Redis up; exits
+  non-zero on any failure, so it can gate a commit or CI).
 - `/usage` — per-person queries, cache hits, tokens used/saved and cost
   (from `cost_per_1k_tokens` in `client.yaml`). Admins see the whole team.
 - `RECALQ_ADMINS=alice,795445523` in `.env` — who counts as admin.
