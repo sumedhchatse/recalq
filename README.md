@@ -134,6 +134,21 @@ steps and what's needed to finish it — Slack's docstring explains why it's
 a smaller task (Socket Mode, one new dependency) than Teams' (needs a
 public HTTPS endpoint + Azure Bot Service registration).
 
+### Installing on a server
+
+```
+git clone https://github.com/sumedhchatse/recalq && cd recalq
+./install.sh                    # into /opt/recalq (prints the one sudo step if needed)
+```
+
+It installs the code, a virtualenv and the embedding model (shared by
+everyone, in `models/`), creates `.env` from `.env.example` with a random
+Redis password, and starts `recalq-redis`, `recalq-embed` and (if a bot
+token is set) `recalq-telegram` as `systemctl --user` services. Re-run it
+to upgrade — `.env`, `client.yaml` and data are kept. It ends by printing
+the root-only steps for a team: a `recalq` group, the
+`/usr/local/bin/recalq` symlink, and `loginctl enable-linger`.
+
 ### Team mode (one shared host)
 
 Put Recalq on one server; teammates SSH in, `cd` into a project and run
