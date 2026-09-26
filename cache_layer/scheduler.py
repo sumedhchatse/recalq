@@ -6,7 +6,7 @@ chat. Example:
   schedules:
     - name: morning-digest
       when: "daily 09:00"            # daily HH:MM | weekly mon HH:MM | every 30m / every 6h
-      kind: digest                   # digest | usage | bench | ask | pr
+      kind: digest                   # digest | usage | bench | sync | ask | pr
       project: /home/me/myproject    # digest / ask / pr
       chat: 795445523                # Telegram chat id to post to
       prompt: "..."                  # ask / pr only
@@ -78,6 +78,8 @@ def run_job(job, memlayer):
     model = memlayer.default_model()
     if kind == "usage":
         return memlayer.usage_report(str(job.get("chat", "")))
+    if kind == "sync":
+        return memlayer.sync_knowledge(job.get("source"))
     if kind == "bench":
         import bench
         return bench.run(embedder=memlayer.embedder)[0]

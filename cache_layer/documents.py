@@ -13,7 +13,8 @@ Storage model (namespace-shared, persistent):
   recalq:doc:<namespace>:<doc_id>:chunk:<n>     -> JSON {text, embedding}
   recalq:docs:<namespace>                        -> SET of doc_ids in namespace
 """
-import os, json, time, hashlib, uuid, logging
+import os
+import re, json, time, hashlib, uuid, logging
 
 log = logging.getLogger("recalq.documents")
 
@@ -28,10 +29,10 @@ DOCS_SET   = "recalq:docs:"
 
 # ── Text extraction ──────────────────────────────────────────
 def extract_text(filepath: str, filename: str) -> str:
-    """Extract plain text from PDF, docx, or txt. Raises ValueError on unsupported."""
+    """Extract plain text from PDF, docx, txt or markdown/rst. Raises ValueError on unsupported."""
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
-    if ext == "txt":
+    if ext in ("txt", "md", "markdown", "rst"):
         with open(filepath, "r", errors="ignore") as f:
             return f.read()
 
@@ -48,10 +49,43 @@ def extract_text(filepath: str, filename: str) -> str:
         d = docx.Document(filepath)
         return "\n".join(p.text for p in d.paragraphs)
 
-    raise ValueError(f"Unsupported file type: .{ext}. Supported: pdf, docx, txt")
+    raise ValueError(f"Unsupported file type: .{ext}. Supported: pdf, docx, txt, md, rst")
 
 
 # ── Chunking ─────────────────────────────────────────────────
+# Bump when chunking changes, so knowledge sync re-ingests unchanged files.
+CHUNK_VERSION = 2
+
+
+def chunk_markdown(text: str) -> list:
+    """One chunk per heading section, each prefixed with its heading path
+    ("Operations > Backups") so a question about backups matches the
+    backups section instead of a 400-word slice that straddles three
+    topics. Long sections fall back to word chunks, keeping the prefix."""
+    chunks, path, body = [], [], []
+
+    def flush():
+        words = " ".join(body).split()
+        if not words:
+            return
+        prefix = " > ".join(t for _, t in path)
+        for piece in (chunk_text(" ".join(words)) if len(words) > CHUNK_WORDS else [" ".join(words)]):
+            chunks.append(f"{prefix}\n{piece}" if prefix else piece)
+
+    in_code = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        m = None if in_code else re.match(r"^(#{1,6})\s+(.*)", line)
+        if m:
+            flush()
+            body = []
+            level = len(m.group(1))
+            path = [(lvl, t) for lvl, t in path if lvl < level] + [(level, m.group(2).strip())]
+        else:
+            body.append(line)
+    flush()
+    return chunks
 def chunk_text(text: str) -> list:
     """Split text into overlapping word-chunks. Returns list of strings."""
     words = text.split()
@@ -121,7 +155,8 @@ def ingest_document(r, embedder, guardrails, filepath, filename,
     # Always use the redacted text when any PII (critical or not) was found.
     clean_text = scan["clean_text"] if scan.get("findings") else text
 
-    chunks = chunk_text(clean_text)
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    chunks = chunk_markdown(clean_text) if ext in ("md", "markdown") else chunk_text(clean_text)
     if not chunks:
         raise ValueError("Document produced no usable text chunks.")
 
@@ -193,6 +228,26 @@ def delete_document(r, namespace, doc_id):
 
 
 # ── Retrieval (RAG core) ─────────────────────────────────────
+KEYWORD_WEIGHT = 0.15
+
+
+def _keyword_boost(question, texts):
+    """Up to +KEYWORD_WEIGHT per chunk for containing the question's
+    distinctive words. Embeddings of a short question vs a long chunk rank
+    poorly on their own: "restore a backup" lost to a doc's intro that merely
+    shared the product name. Words found in most chunks (the product name,
+    "the") carry no signal, so they're ignored — a crude IDF, no stopword list.
+    Substring match, so "backup" also hits "backups" and "restore_cache"."""
+    import numpy as np
+    lowered = [t.lower() for t in texts]
+    words = {w for w in re.findall(r"[a-z0-9_]{4,}", question.lower())}
+    words = [w for w in words if sum(w in t for t in lowered) <= len(lowered) / 2]
+    if not words:
+        return np.zeros(len(texts), dtype=np.float32)
+    return np.asarray([KEYWORD_WEIGHT * sum(w in t for w in words) / len(words) for t in lowered],
+                      dtype=np.float32)
+
+
 def find_relevant_chunks(r, embedder, batch_cosine_fn, question,
                          namespace, doc_id=None, top_k=TOP_CHUNKS):
     """
@@ -239,7 +294,7 @@ def find_relevant_chunks(r, embedder, batch_cosine_fn, question,
     mat = np.vstack([np.asarray(e["embedding"], dtype=np.float32) for e in entries])
     qn = q / (np.linalg.norm(q) + 1e-9)
     mn = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
-    scores = mn @ qn
+    scores = mn @ qn + _keyword_boost(question, [e["text"] for e in entries])
 
     ranked = sorted(
         [{"text": entries[i]["text"], "score": float(scores[i]),

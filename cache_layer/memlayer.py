@@ -1858,6 +1858,13 @@ def review_code(root, model, target="", *, user, namespace, **kwargs):
     return gitflow.review(root, model, target, on_usage=_record, **kwargs)
 
 
+def sync_knowledge(only=None) -> str:
+    """Sync client.yaml knowledge_sources into the org knowledge base."""
+    import knowledge
+    import guardrails as _guardrails_mod
+    return knowledge.sync_all(CLIENT_YAML, r, embedder, _guardrails_mod, only=only)
+
+
 def usage_report(user) -> str:
     """Plain-text per-person usage table: admins see the whole team, anyone
     else only their own row."""

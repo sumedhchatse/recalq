@@ -16,7 +16,7 @@ _plugin_api = load_plugins(_plugins_dir)
 # my order?") can never be mistaken for a built-in command.
 _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
               "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage",
-              "/approve", "/reject", "/diff", "/pr", "/review", "/bench", "/reset"] + [
+              "/approve", "/reject", "/diff", "/pr", "/review", "/bench", "/sync", "/reset"] + [
               f"/{c}" for c in _plugin_api.commands.keys()]
 
 _TTY = sys.stdout.isatty()
@@ -56,7 +56,7 @@ print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
 print(_RULE)
 print(_c("2", "  /quit /stats /usage /cache /providers /status /add /project /plugins /reset "
                "/model <name> /doc <path> /image <path> [q] /agent <task> /diff /undo /approve /reject"))
-print(_c("2", "  /pr <task> (agent on a branch → PR) /review [pr#|base] /bench (pick best agent model)"))
+print(_c("2", "  /pr <task> (agent on a branch → PR) /review [pr#|base] /bench (pick best agent model) /sync [source]"))
 print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
 print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
 print(_c("2", f"  signed in as '{_cli_user}'" + (" (admin)" if is_admin(_cli_user) else "")))
@@ -321,6 +321,10 @@ while True:
                            embedder=embedder,
                               on_step=lambda n, a: print(_c("2", f"  🔍 {n} {a.get('path') or a.get('query') or a.get('pattern') or ''}")))
         print(f"\n{_c('1;32', 'Recalq')} › {_out}\n{_RULE}\n")
+        continue
+    if user_input == "/sync" or user_input.startswith("/sync "):
+        print(_c("2", "📚 syncing knowledge sources ..."))
+        print("\n" + sync_knowledge(user_input[len("/sync"):].strip() or None) + "\n")
         continue
     if user_input == "/bench":
         import bench

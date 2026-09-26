@@ -228,7 +228,7 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
         send(chat_id, "Commands: /model <name> | /providers | /stats | /usage | /cache | /reset | /help\n"
                        "/approve | /reject — admins: vouch for or remove the last answer.\n"
                        "/pr <task> — agent on a new branch, opens a PR | /review [pr#|base] | "
-                       "/bench (admins) | /jobs — scheduled jobs from client.yaml\n"
+                       "/bench, /sync [source] (admins) | /jobs — scheduled jobs from client.yaml\n"
                        "/cd <path> | /agent <task> | /diff | /undo — point the agent at a project directory on "
                        "the server, then have it read/edit files and run shell commands there; "
                        "/diff shows what its last run changed, /undo reverts it (repeat to go further back).\n"
@@ -330,6 +330,13 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
             import bench
             send(chat_id, "\U0001f3c1 benchmarking every ready provider — a few minutes ...")
             threading.Thread(target=lambda: send(chat_id, bench.run(embedder=memlayer.embedder)[0]),
+                             daemon=True).start()
+    elif cmd == "/sync":
+        if not memlayer.is_admin(user_id):
+            send(chat_id, "Only admins can /sync the knowledge base.")
+        else:
+            send(chat_id, "\U0001f4da syncing knowledge sources ...")
+            threading.Thread(target=lambda: send(chat_id, memlayer.sync_knowledge(arg or None)),
                              daemon=True).start()
     elif cmd == "/jobs":
         jobs = scheduler.load_jobs(memlayer.CLIENT_YAML)

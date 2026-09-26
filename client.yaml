@@ -212,6 +212,14 @@ agent_provider: nvidia_nemotron-3-super
 # environment variables (.env) — see CACHE_TTL, SIMILARITY_CUTOFF,
 # REDIS_HOST, REDIS_PORT, REDIS_PASSWORD.
 
+# ── Knowledge sources (synced into the org knowledge base; /sync) ──
+# path: relative = inside the install. Or git: <url> (+ branch:). See
+# docs/knowledge-sources.md.
+knowledge_sources:
+  - name: recalq-docs
+    path: docs
+    category: info
+
 # ── Scheduled jobs (run by telegram_bot.py, posted to a Telegram chat) ──
 # when: "daily HH:MM" | "weekly mon HH:MM" | "every 30m" / "every 6h" (local time)
 # kind: digest (git log summary) | usage (team /usage) | bench (re-pick
@@ -226,6 +234,10 @@ schedules:
   - name: weekly-usage
     when: "weekly mon 09:00"
     kind: usage
+    chat: 795445523
+  - name: nightly-kb-sync
+    when: "daily 03:30"
+    kind: sync
     chat: 795445523
   - name: weekly-bench
     when: "weekly sun 03:00"

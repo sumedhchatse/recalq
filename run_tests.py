@@ -21,6 +21,7 @@ SUITE = [
     "cache_layer/test_gitflow.py",
     "cache_layer/test_scheduler.py",
     "cache_layer/test_security.py",
+    "cache_layer/test_knowledge.py",
     "cache_layer/test_team.py",
     "cache_layer/test_team_memory.py",
     "cache_layer/test_session_resume.py",
