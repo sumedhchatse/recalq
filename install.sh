@@ -72,11 +72,15 @@ fi
 PY="$PREFIX/.venv/bin/python3"
 "$PY" -m pip install -q --upgrade pip
 REQ="$PREFIX/requirements.txt"
-if ! command -v nvidia-smi >/dev/null && ! "$PY" -c "import torch" 2>/dev/null; then
+if ! command -v nvidia-smi >/dev/null; then
   # No GPU: the CPU build of torch is ~200 MB instead of ~3 GB of CUDA
-  # libraries that would never be used (embeddings run fine on CPU).
-  say "no GPU found — installing CPU-only torch"
-  "$PY" -m pip install -q "$(grep '^torch==' "$REQ")" --index-url https://download.pytorch.org/whl/cpu
+  # libraries that would never be used (embeddings run fine on CPU). Skip
+  # the CUDA packages on every run, not just the first — but only install
+  # CPU torch when torch is missing, so an existing working torch is kept.
+  if ! "$PY" -c "import torch" 2>/dev/null; then
+    say "no GPU found — installing CPU-only torch"
+    "$PY" -m pip install -q "$(grep '^torch==' "$REQ")" --index-url https://download.pytorch.org/whl/cpu
+  fi
   REQ="$(mktemp)"; grep -vE '^(nvidia-|triton)' "$PREFIX/requirements.txt" > "$REQ"
 fi
 say "installing Python packages"
