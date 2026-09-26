@@ -19,7 +19,7 @@ import redis
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from guardrails import check_query, check_answer
-from providers import (chat_completion, default_model, list_providers,
+from providers import (chat_completion, default_model, list_providers, cooldowns,
                        provider_status, add_provider, save_api_key, architect_provider)
 import agent
 import audit
@@ -1144,34 +1144,14 @@ def _trim_history_for_llm(history: list, query: str) -> list:
 
 # ── Main ask() ───────────────────────────────────────────────
 
-_AUTO_PREF_ORDER = ["groq", "nvidia", "nvidia_kimi-k2", "nvidia_deepseek-v4-flash", "deepseek", "gemini", "claude"]
-
 def _resolve_auto_provider():
-    """
-    Pick the lowest-cost enabled provider. Ties (e.g. multiple free
-    providers at 0.0) are broken by a fast/reliable preference order.
-    Falls back to 'groq' if the registry can't be read.
-    """
-    from providers import provider_registry
-    try:
-        provs = provider_registry()
-        if not provs:
-            return "groq"
-        # lowest cost first; tie-break by preference order (lower index = preferred)
-        def _rank(item):
-            key, p = item
-            cost = p.get("cost_per_1k_tokens", 999)
-            try:
-                pref = _AUTO_PREF_ORDER.index(key)
-            except ValueError:
-                pref = 999
-            return (cost, pref)
-        best_key, best = sorted(provs.items(), key=_rank)[0]
-        log.info(f"AUTO resolved -> {best_key} (cost={best.get('cost_per_1k_tokens')})")
-        return best_key
-    except Exception as _e:
-        log.warning(f"AUTO resolve failed ({_e}); using groq")
-        return "groq"
+    """Cheapest ready provider that hasn't failed recently (see
+    providers.ranked_providers). Falls back to 'groq' if none are ready."""
+    from providers import ranked_providers
+    ranked = ranked_providers()
+    best = ranked[0] if ranked else "groq"
+    log.info(f"AUTO resolved -> {best}")
+    return best
 
 
 def _sop_has_knowledge():
@@ -1774,9 +1754,12 @@ if __name__ == "__main__":
             print("  conversation and attached-doc context cleared\n")
             continue
         if user_input == "/providers":
+            _cool = cooldowns()
             for s in provider_status(live=False):
                 mark = "✓" if s["ready"] else "✗ (missing API key)"
                 shared = f"  [shares key with: {', '.join(s['shared_with'])}]" if s["shared_with"] else ""
+                if s["alias"] in _cool:
+                    mark += f" (failed recently — skipped for {_cool[s['alias']]}s)"
                 print(f"  {s['alias']:14s} → {s['model']:35s} {mark}{shared}")
             print("  (or type any litellm model string, e.g. ollama/llama3.1, openai/gpt-4o)")
             print("  '/status' does a live check | '/add' registers a new provider\n")

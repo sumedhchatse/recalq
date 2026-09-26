@@ -9,6 +9,7 @@ import os
 import socket
 import logging
 import threading
+import time
 import yaml
 
 # This host's IPv6 route is a black hole (SYNs vanish, no RST) while IPv4
@@ -234,23 +235,71 @@ def _call_with_timeout(fn, _timeout, *args, **kwargs):
     return box["value"]
 
 
-def chat_completion(alias_or_model: str, messages: list, max_tokens: int = 800, _seen=None,
-                     tools: list = None):
+# In-process circuit breaker: a provider that just failed (bad key, out of
+# credits, overloaded) is skipped for COOLDOWN_SECS instead of eating a full
+# REQUEST_TIMEOUT on every single request until someone notices.
+# ponytail: per-process memory only — the CLI, Telegram bot and MCP server
+# each learn failures separately; move to Redis if that duplication hurts.
+COOLDOWN_SECS = float(os.getenv("PROVIDER_COOLDOWN", "300"))
+MAX_ATTEMPTS = int(os.getenv("PROVIDER_MAX_ATTEMPTS", "3"))
+_cooldown_until = {}  # alias -> unix ts
+
+
+def _healthy(alias):
+    return _cooldown_until.get(alias, 0) <= time.time()
+
+
+def cooldowns() -> dict:
+    """{alias: seconds_left} for providers currently being skipped."""
+    now = time.time()
+    return {a: int(t - now) for a, t in _cooldown_until.items() if t > now}
+
+
+def ranked_providers() -> list:
+    """Enabled aliases whose key is set, cheapest first (client.yaml order
+    breaks ties), recently-failed ones last."""
+    ready = [(a, p) for a, p in _PROVIDERS.items() if p.get("enabled")
+             and (not p.get("api_key_env") or os.getenv(p["api_key_env"]))]
+    ready.sort(key=lambda ap: (not _healthy(ap[0]), ap[1].get("cost_per_1k_tokens", 999)))
+    return [a for a, _ in ready]
+
+
+def _candidates(alias_or_model):
+    """Order to try: the requested model, its fallback_to chain, then every
+    other ready provider cheapest-first. Cooled-down ones are dropped unless
+    that leaves nothing (then retry them all — maybe the network is back)."""
+    chain = []
+    cur = alias_or_model
+    while cur and cur not in chain:  # fallback chains can cycle (a->b->a)
+        chain.append(cur)
+        cur = (_PROVIDERS.get(cur) or {}).get("fallback_to")
+    order = chain + [a for a in ranked_providers() if a not in chain]
+    healthy = [a for a in order if _healthy(a)]
+    return (healthy or order)[:MAX_ATTEMPTS]
+
+
+def chat_completion(alias_or_model: str, messages: list, max_tokens: int = 800,
+                    tools: list = None):
     """Drop-in for the old proxy's `client.chat.completions.create(...)`.
-    Same response shape — litellm mirrors the OpenAI SDK's response object.
-    `tools`, if given, is an OpenAI-style function-calling tool list — not
-    every provider/model supports it (litellm raises if the target doesn't)."""
-    _seen = (_seen or set()) | {alias_or_model}
-    model, api_key, api_base, fallback = _resolve(alias_or_model)
-    can_fallback = fallback and fallback not in _seen  # fallback chains can cycle (a->b->a)
-    kwargs = dict(model=model, messages=messages, max_tokens=max_tokens,
-                  api_key=api_key, api_base=api_base, timeout=REQUEST_TIMEOUT)
-    if tools:
-        kwargs["tools"] = tools
-    try:
-        return _call_with_timeout(litellm.completion, REQUEST_TIMEOUT, **kwargs)
-    except Exception as e:
-        if can_fallback:
-            log.warning(f"provider '{alias_or_model}' failed ({e}) — falling back to '{fallback}'")
-            return chat_completion(fallback, messages, max_tokens, _seen, tools=tools)
-        raise
+    Same response shape — litellm mirrors the OpenAI SDK's response object,
+    so `resp.model` still says which model actually answered after a
+    fallback. `tools`, if given, is an OpenAI-style function-calling tool
+    list — not every provider/model supports it (litellm raises if the
+    target doesn't, which just moves on to the next candidate)."""
+    last_err = None
+    for alias in _candidates(alias_or_model):
+        try:
+            model, api_key, api_base, _ = _resolve(alias)
+            kwargs = dict(model=model, messages=messages, max_tokens=max_tokens,
+                          api_key=api_key, api_base=api_base, timeout=REQUEST_TIMEOUT)
+            if tools:
+                kwargs["tools"] = tools
+            resp = _call_with_timeout(litellm.completion, REQUEST_TIMEOUT, **kwargs)
+            _cooldown_until.pop(alias, None)
+            return resp
+        except Exception as e:
+            last_err = e
+            _cooldown_until[alias] = time.time() + COOLDOWN_SECS
+            log.warning(f"provider '{alias}' failed ({str(e)[:150]}) — skipping it for "
+                        f"{COOLDOWN_SECS:.0f}s, trying next")
+    raise last_err
