@@ -21,7 +21,8 @@ import numpy as np
 from guardrails import check_query, check_answer
 from providers import (chat_completion, default_model, list_providers, cooldowns,
                        provider_status, add_provider, save_api_key, architect_provider,
-                       use_redis, free_only, provider_registry, agent_provider)
+                       use_redis, free_only, provider_registry, agent_provider,
+                       _CLIENT_YAML as CLIENT_YAML)
 import agent
 import audit
 import sop_layer
@@ -1834,6 +1835,14 @@ def run_agent(task, model, *, user, namespace, **kwargs):
     return answer
 
 
+def run_agent_pr(task, model, *, user, namespace, root, **kwargs):
+    """run_agent() on its own git branch → commit → PR (see gitflow)."""
+    import gitflow
+    return gitflow.run_as_pr(
+        task, lambda t: run_agent(t, model, user=user, namespace=namespace, root=root, **kwargs),
+        root)
+
+
 def usage_report(user) -> str:
     """Plain-text per-person usage table: admins see the whole team, anyone
     else only their own row."""
@@ -1879,7 +1888,7 @@ if __name__ == "__main__":
     # my order?") can never be mistaken for a built-in command.
     _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
                   "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage",
-                  "/approve", "/reject", "/diff", "/reset"] + [
+                  "/approve", "/reject", "/diff", "/pr", "/review", "/bench", "/reset"] + [
                   f"/{c}" for c in _plugin_api.commands.keys()]
 
     _TTY = sys.stdout.isatty()
@@ -1919,6 +1928,7 @@ if __name__ == "__main__":
     print(_RULE)
     print(_c("2", "  /quit /stats /usage /cache /providers /status /add /project /plugins /reset "
                    "/model <name> /doc <path> /image <path> [q] /agent <task> /diff /undo /approve /reject"))
+    print(_c("2", "  /pr <task> (agent on a branch → PR) /review [pr#|base] /bench (pick best agent model)"))
     print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
     print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
     print(_c("2", f"  signed in as '{_cli_user}'" + (" (admin)" if is_admin(_cli_user) else "")))
@@ -2164,6 +2174,31 @@ if __name__ == "__main__":
             restored = _agent.undo(os.getcwd())
             print(f"  reverted: {', '.join(restored)}\n" if restored
                   else "  nothing to undo — no agent changes left in this session\n")
+            continue
+        if user_input.startswith("/pr "):
+            _task = user_input.split(" ", 1)[1].strip()
+            _agent_model = model if _model_chosen else (agent_provider() or model)
+            print(_c("2", f"🌿 agent working on a new branch in {os.getcwd()} ..."))
+            _out = run_agent_pr(_task, _agent_model, user=_cli_user, namespace=_cli_namespace,
+                                root=os.getcwd(), embedder=embedder,
+                                on_step=lambda n, a: print(_c("33", f"  → {n} "
+                                    f"{a.get('path') or a.get('command') or a.get('question') or a.get('query') or ''}")),
+                                architect_model=architect_provider(), history=history)
+            print(f"\n{_c('1;32', 'Recalq')} › {_out}\n{_RULE}\n")
+            continue
+        if user_input == "/review" or user_input.startswith("/review "):
+            import gitflow
+            print(_c("2", "🔎 reviewing ..."))
+            _out = gitflow.review(os.getcwd(), model if _model_chosen else (agent_provider() or model),
+                                  user_input[len("/review"):], embedder=embedder,
+                                  on_step=lambda n, a: print(_c("2", f"  🔍 {n} {a.get('path') or a.get('query') or a.get('pattern') or ''}")))
+            print(f"\n{_c('1;32', 'Recalq')} › {_out}\n{_RULE}\n")
+            continue
+        if user_input == "/bench":
+            import bench
+            print(_c("2", "🏁 benchmarking every ready provider on small agent tasks "
+                           "(a few minutes, uses real API calls) ..."))
+            print("\n" + bench.run(embedder=embedder)[0] + "\n")
             continue
         if user_input.startswith("/agent "):
             _run_agent_and_print(user_input.split(" ", 1)[1].strip())

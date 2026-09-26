@@ -17,6 +17,7 @@ import hashlib
 import fnmatch
 import ipaddress
 import subprocess
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
@@ -364,6 +365,16 @@ def _snapshot(root, full, old_content):
     _save_stack(root)
 
 
+def forget_last(root):
+    """Drop the newest checkpoint without restoring it — for when its
+    edits have moved somewhere undo shouldn't replay them (e.g. /pr
+    committed them on another branch)."""
+    stack = _stack(root)
+    if stack:
+        stack.pop()
+        _save_stack(root)
+
+
 def last_changes(root):
     """{abs path: pre-edit content} for the current/most recent run()."""
     return (_stack(root) or [{}])[-1]
@@ -619,8 +630,11 @@ def _loop(messages, model, root, confirm, on_step, tools, max_steps, max_tokens,
         # Several read-only calls in one turn (e.g. three explore sub-agents)
         # run concurrently; anything that writes or may prompt stays in order.
         if len(calls) > 1 and all(name in PARALLEL_SAFE for _, name, _ in calls):
+            # Worker threads don't inherit contextvars (e.g. providers'
+            # budget free_only mode) — run each in a copy of ours.
+            ctx = contextvars.copy_context()
             with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-                results = list(pool.map(_exec, calls))
+                results = list(pool.map(lambda c: ctx.copy().run(_exec, c), calls))
         else:
             results = [_exec(c) for c in calls]
         for (tc, _, _), result in zip(calls, results):

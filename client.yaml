@@ -192,7 +192,7 @@ auto_provider: groq
 # gemini_flash, groq and nvidia_nemotron-3-super all stayed in scope and
 # ran the tests; gemini (flash-lite) also "fixed" a function it wasn't
 # asked to. /model in a session overrides this.
-agent_provider: gemini_flash
+agent_provider: nvidia_nemotron-3-super
 
 # ── Architect mode for /agent (optional, off by default) ─────────
 # When set, /agent runs a two-pass "architect" flow (the technique Aider
@@ -207,3 +207,23 @@ agent_provider: gemini_flash
 # Cache TTL / similarity threshold / Redis connection are set via
 # environment variables (.env) — see CACHE_TTL, SIMILARITY_CUTOFF,
 # REDIS_HOST, REDIS_PORT, REDIS_PASSWORD.
+
+# ── Scheduled jobs (run by telegram_bot.py, posted to a Telegram chat) ──
+# when: "daily HH:MM" | "weekly mon HH:MM" | "every 30m" / "every 6h" (local time)
+# kind: digest (git log summary) | usage (team /usage) | bench (re-pick
+#       agent_provider) | ask (question about a project) | pr (agent task
+#       -> branch + PR; shell only runs if AGENT_SANDBOX is on)
+# schedules:
+#   - name: morning-digest
+#     when: "daily 09:00"
+#     kind: digest
+#     project: /home/sumedh/memlayer
+#     chat: 795445523
+#   - name: weekly-usage
+#     when: "weekly mon 09:00"
+#     kind: usage
+#     chat: 795445523
+#   - name: weekly-bench
+#     when: "weekly sun 03:00"
+#     kind: bench
+#     chat: 795445523

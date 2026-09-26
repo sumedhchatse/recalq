@@ -182,6 +182,16 @@ next); conversations stay per person. Identity is the OS login
 - Checkpoints are saved under `~/.recalq/checkpoints/`
   (`AGENT_CHECKPOINT_DIR`), so `/undo` works after a restart and across
   the CLI and Telegram.
+- `/pr <task>` — runs the agent on a new `recalq/…` branch, commits, and
+  (with a GitHub remote + `gh`) pushes and opens a PR; you stay on your
+  branch. Needs a clean working tree. `RECALQ_PR_PUSH=0` = commit only.
+- `/review` — reviews uncommitted changes (incl. new files), `/review main`
+  the current branch vs main, `/review 42` PR #42 (via `gh`).
+- `/bench` — runs two small agent tasks on every ready provider (no
+  fallback, model-written code is never executed on the host) and sets
+  `agent_provider` to the best one that passes both.
+- `schedules:` in `client.yaml` — recurring digest / usage / bench / ask /
+  pr jobs run by the Telegram bot and posted to a chat (`/jobs` lists them).
 - `AGENT_AUTO_ALLOW="pytest*,python3 test_*,npm test"` — shell commands
   `/agent` may run without asking (anything with `; & | $ > <` or `..`
   still asks).

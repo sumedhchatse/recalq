@@ -122,6 +122,19 @@ def test_free_only_never_touches_paid():
             assert "budget" in str(e)
 
 
+def test_exact_only_no_fallback_even_when_cooled():
+    calls = _setup(dead={"x/paid"})
+    p._cooldown_until["free2"] = p.time.time() + 60
+    with p.exact_only():
+        try:
+            p.chat_completion("paid", [])
+            assert False
+        except RuntimeError:
+            pass
+        assert p.chat_completion("free2", []) == "ok:x/free2"  # tried despite cooldown
+    assert calls == ["x/paid", "x/free2"], calls
+
+
 if __name__ == "__main__":
     test_follows_chain_then_cheapest()
     test_failed_provider_is_skipped_next_time()
@@ -130,4 +143,5 @@ if __name__ == "__main__":
     test_ranked_cheapest_first_cooled_last()
     test_cooldown_shared_through_redis()
     test_free_only_never_touches_paid()
+    test_exact_only_no_fallback_even_when_cooled()
     print("ok")

@@ -497,6 +497,7 @@ def test_explore_subagents_run_in_parallel_with_fresh_context():
             if len(main_turns) == 1:
                 return resp(calls=[call(1, "where is auth"), call(2, "where is billing")])
             return resp(content="done")
+        free_flags.append(agent_providers._FREE_ONLY.get())
         with lock:  # a sub-agent: fresh context = just its own system prompt + question
             active[0] += 1
             peak[0] = max(peak[0], active[0])
@@ -505,10 +506,13 @@ def test_explore_subagents_run_in_parallel_with_fresh_context():
         with lock:
             active[0] -= 1
         return resp(content="found in " + messages[1]["content"][9:] + ".py")
+    free_flags = []
+    import providers as agent_providers
     agent.chat_completion = fake
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory() as root, agent_providers.free_only():
         assert agent.run("x", "m", root=root) == "done"
     assert peak[0] == 2, peak  # both sub-agents ran at the same time
+    assert free_flags == [True, True], free_flags  # budget mode reached the worker threads
     tool_msgs = [m["content"] for m in main_turns[1] if m.get("role") == "tool"]
     assert tool_msgs == ["found in auth.py", "found in billing.py"], tool_msgs  # order kept
 

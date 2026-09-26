@@ -40,6 +40,8 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 import memlayer  # noqa: E402
+import scheduler  # noqa: E402
+import threading
 import agent as _agent  # noqa: E402 — same engine-level agent loop the CLI's /agent uses
 
 # memlayer's import above already claimed logging.basicConfig() (it's a
@@ -225,6 +227,8 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
     if cmd in ("/start", "/help"):
         send(chat_id, "Commands: /model <name> | /providers | /stats | /usage | /cache | /reset | /help\n"
                        "/approve | /reject — admins: vouch for or remove the last answer.\n"
+                       "/pr <task> — agent on a new branch, opens a PR | /review [pr#|base] | "
+                       "/bench (admins) | /jobs — scheduled jobs from client.yaml\n"
                        "/cd <path> | /agent <task> | /diff | /undo — point the agent at a project directory on "
                        "the server, then have it read/edit files and run shell commands there; "
                        "/diff shows what its last run changed, /undo reverts it (repeat to go further back).\n"
@@ -294,6 +298,37 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
         restored = _agent.undo(_chat_root.get(chat_id, os.getcwd()))
         send(chat_id, ("Reverted the last agent run: " + ", ".join(restored))
              if restored else "Nothing to undo — no agent changes left.")
+    elif cmd == "/pr":
+        if not arg:
+            send(chat_id, "usage: /pr <task> — runs the agent on a new branch and opens a PR")
+        else:
+            root = _chat_root.get(chat_id, os.getcwd())
+            send(chat_id, f"\U0001f33f agent working on a new branch in {root} ...")
+            out = memlayer.run_agent_pr(
+                arg, _chat_model.get(chat_id) or memlayer.agent_provider() or memlayer.default_model(),
+                user=user_id, namespace=_telegram_namespace(chat_id), root=root,
+                confirm=_telegram_confirm(chat_id, user_id), on_step=_telegram_on_step(chat_id),
+                embedder=memlayer.embedder, history=_get_history(chat_id))
+            send(chat_id, out)
+            _push_history(chat_id, f"/pr {arg}", out)
+    elif cmd == "/review":
+        import gitflow
+        send(chat_id, "\U0001f50e reviewing ...")
+        send(chat_id, gitflow.review(_chat_root.get(chat_id, os.getcwd()),
+                                     _chat_model.get(chat_id) or memlayer.agent_provider()
+                                     or memlayer.default_model(), arg, embedder=memlayer.embedder))
+    elif cmd == "/bench":
+        if not memlayer.is_admin(user_id):
+            send(chat_id, "Only admins can run /bench (it changes the team's agent model).")
+        else:
+            import bench
+            send(chat_id, "\U0001f3c1 benchmarking every ready provider — a few minutes ...")
+            threading.Thread(target=lambda: send(chat_id, bench.run(embedder=memlayer.embedder)[0]),
+                             daemon=True).start()
+    elif cmd == "/jobs":
+        jobs = scheduler.load_jobs(memlayer.CLIENT_YAML)
+        send(chat_id, "\n".join(f"{j['name']}: {j['kind']} {j['when']} -> chat {j.get('chat')}"
+                                for j in jobs) or "No scheduled jobs — add `schedules:` to client.yaml.")
     elif cmd == "/agent":
         if not arg:
             send(chat_id, "usage: /agent <task>")
@@ -423,7 +458,15 @@ def main():
         log.warning("TELEGRAM_ALLOWED_USERS not set — bot will reply to no one until it is")
 
     log.info("Telegram bot started, long-polling...")
+    try:
+        jobs = scheduler.load_jobs(memlayer.CLIENT_YAML)
+    except Exception as e:
+        log.error(f"schedules not loaded: {e}")
+        jobs = []
+    if jobs:
+        log.info(f"scheduled jobs: {', '.join(j['name'] for j in jobs)}")
     while True:
+        scheduler.tick(jobs, memlayer, send, log)
         try:
             updates = _get_updates(timeout=30)
         except Exception as e:

@@ -315,6 +315,38 @@ def free_only(active=True):
         _FREE_ONLY.reset(token)
 
 
+# Set (via exact_only()) while benchmarking: no fallback, no skipping — a
+# provider must answer itself or fail, or a broken one would "pass" on a
+# neighbour's answer.
+_EXACT_ONLY = contextvars.ContextVar("recalq_exact_only", default=False)
+
+
+@contextlib.contextmanager
+def exact_only():
+    token = _EXACT_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _EXACT_ONLY.reset(token)
+
+
+def set_agent_provider(alias):
+    """Point client.yaml's agent_provider at `alias` (adds the line if
+    missing) and apply it to this process."""
+    global _AGENT
+    import re as _re
+    with open(_CLIENT_YAML) as f:
+        content = f.read()
+    line = f"agent_provider: {alias}"
+    if _re.search(r"(?m)^agent_provider:.*$", content):
+        content = _re.sub(r"(?m)^agent_provider:.*$", line, content, count=1)
+    else:
+        content = content.rstrip() + "\n\n" + line + "\n"
+    with open(_CLIENT_YAML, "w") as f:
+        f.write(content)
+    _AGENT = alias
+
+
 def _is_free(alias):
     p = _PROVIDERS.get(alias)
     if p is None:  # raw litellm string: only a local ollama model is known-free
@@ -335,6 +367,8 @@ def _candidates(alias_or_model):
     """Order to try: the requested model, its fallback_to chain, then every
     other ready provider cheapest-first. Cooled-down ones are dropped unless
     that leaves nothing (then retry them all — maybe the network is back)."""
+    if _EXACT_ONLY.get():
+        return [alias_or_model]
     chain = []
     cur = alias_or_model
     while cur and cur not in chain:  # fallback chains can cycle (a->b->a)
