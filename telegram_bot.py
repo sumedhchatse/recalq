@@ -205,7 +205,8 @@ def _run_agent(chat_id, user_id, task):
     root = _chat_root.get(chat_id, os.getcwd())
     send(chat_id, f"\U0001f916 agent working in {root} ...")
     try:
-        answer = _agent.run(task, _chat_model.get(chat_id, memlayer.default_model()),
+        answer = memlayer.run_agent(task, _chat_model.get(chat_id, memlayer.default_model()),
+                             user=user_id, namespace=_telegram_namespace(chat_id),
                              root=root, confirm=_telegram_confirm(chat_id, user_id),
                              on_step=_telegram_on_step(chat_id), embedder=memlayer.embedder,
                              architect_model=memlayer.architect_provider(),
@@ -220,7 +221,7 @@ def _run_agent(chat_id, user_id, task):
 def handle_command(chat_id, user_id, cmd, arg) -> bool:
     ns = _telegram_namespace(chat_id)
     if cmd in ("/start", "/help"):
-        send(chat_id, "Commands: /model <name> | /providers | /stats | /cache | /reset | /help\n"
+        send(chat_id, "Commands: /model <name> | /providers | /stats | /usage | /cache | /reset | /help\n"
                        "/cd <path> | /agent <task> | /undo — point the agent at a project directory on "
                        "the server, then have it read/edit files and run shell commands there; "
                        "/undo reverts the files its last run changed.\n"
@@ -266,6 +267,8 @@ def handle_command(chat_id, user_id, cmd, arg) -> bool:
                            f"(cache/docs/history now scoped to this project)")
         else:
             send(chat_id, f"no such directory: {arg}")
+    elif cmd == "/usage":
+        send(chat_id, memlayer.usage_report(user_id))
     elif cmd == "/undo":
         restored = _agent.undo(_chat_root.get(chat_id, os.getcwd()))
         send(chat_id, ("Reverted the last agent run: " + ", ".join(restored))

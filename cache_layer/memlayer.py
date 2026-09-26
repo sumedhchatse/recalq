@@ -1635,6 +1635,49 @@ AGENT_TRIGGERS = ("find the bug", "find a bug", "fix the bug", "fix a bug", "fix
                   "make it so", "just do it", "go ahead and do it")
 
 
+# ── Team mode ────────────────────────────────────────────────
+# Accounts are whatever identity the surface already has — the OS login on
+# a shared host for the CLI (RECALQ_USER overrides), the numeric user id on
+# Telegram. RECALQ_ADMINS lists who may see everyone's usage.
+ADMINS = {u.strip() for u in os.getenv("RECALQ_ADMINS", "").split(",") if u.strip()}
+
+
+def is_admin(user) -> bool:
+    return str(user) in ADMINS
+
+
+def run_agent(task, model, *, user, namespace, **kwargs):
+    """agent.run() plus an audit entry, so /agent work shows up in /usage
+    like any other query (it's usually the most expensive kind)."""
+    _t0 = time.time()
+
+    def _record(model_used, tokens):
+        audit.record(r, user=user, query=f"[agent] {task}", model=model_used,
+                     source=_normalize_source(model_used), namespace=namespace,
+                     tokens_used=tokens, latency_ms=int((time.time() - _t0) * 1000))
+    return agent.run(task, model, on_usage=_record, **kwargs)
+
+
+def usage_report(user) -> str:
+    """Plain-text per-person usage table: admins see the whole team, anyone
+    else only their own row."""
+    from providers import provider_registry
+    costs = {a: p.get("cost_per_1k_tokens", 0.0) for a, p in provider_registry().items()}
+    rows = audit.usage_by_user(r, costs)
+    if not is_admin(user):
+        rows = {k: v for k, v in rows.items() if k == str(user)}
+    if not rows:
+        return "no usage recorded yet"
+    lines = [f"{'user':16s} {'queries':>7s} {'cached':>6s} {'llm':>5s} {'tokens':>9s} "
+             f"{'saved':>9s} {'cost $':>8s}"]
+    for name, u in sorted(rows.items(), key=lambda kv: -kv[1]["tokens_used"]):
+        lines.append(f"{name:16s} {u['queries']:7d} {u['cache_hits']:6d} {u['llm_calls']:5d} "
+                     f"{u['tokens_used']:9d} {u['tokens_saved']:9d} {u['cost_usd']:8.4f}")
+    if not is_admin(user):
+        lines.append("(your usage only — admins listed in RECALQ_ADMINS see the whole team)")
+    return "\n".join(lines)
+
+
 # ── CLI ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     import readline  # noqa: F401 — importing it wires input() up with arrow-key history
@@ -1647,7 +1690,7 @@ if __name__ == "__main__":
     # Commands are slash-prefixed so a real question ("what's the status of
     # my order?") can never be mistaken for a built-in command.
     _CLI_WORDS = ["/quit", "/stats", "/cache", "/providers", "/status", "/add", "/project",
-                  "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/reset"] + [
+                  "/plugins", "/model", "/doc", "/image", "/agent", "/undo", "/usage", "/reset"] + [
                   f"/{c}" for c in _plugin_api.commands.keys()]
 
     _TTY = sys.stdout.isatty()
@@ -1676,14 +1719,20 @@ if __name__ == "__main__":
     readline.parse_and_bind("tab: complete")
 
     _cli_namespace = project_namespace(os.getcwd())
+    import getpass
+    _cli_user = os.getenv("RECALQ_USER") or getpass.getuser()
+    # Cache/docs are shared by everyone working in this project on this
+    # host (that's the team win); the conversation itself is per person.
+    _history_ns = f"{_cli_namespace}_{_cli_user}"
 
     print()
     print(_c("1;36", "🧠 Recalq"), _c("2", f"— {os.getcwd()}"))
     print(_RULE)
-    print(_c("2", "  /quit /stats /cache /providers /status /add /project /plugins /reset "
+    print(_c("2", "  /quit /stats /usage /cache /providers /status /add /project /plugins /reset "
                    "/model <name> /doc <path> /image <path> [q] /agent <task> /undo"))
     print(_c("2", "  Tab completes commands/models/paths · ↑/↓ history"))
     print(_c("2", f"  cache/docs scoped to '{_cli_namespace}' — different project dirs never mix"))
+    print(_c("2", f"  signed in as '{_cli_user}'" + (" (admin)" if is_admin(_cli_user) else "")))
     if _plugin_api.loaded:
         print(_c("2", f"  plugins loaded: {', '.join(_plugin_api.loaded)}"))
     print(_RULE)
@@ -1702,8 +1751,9 @@ if __name__ == "__main__":
                 return
             preview = args.get("path") or args.get("command") or args.get("query") or args.get("pattern") or args.get("url", "")
             print(_c("33", f"  → {name} {preview}"))
-        answer = _agent.run(task, model, root=os.getcwd(), on_step=_on_step, embedder=embedder,
-                            architect_model=architect_provider(), history=history)
+        answer = run_agent(task, model, user=_cli_user, namespace=_cli_namespace,
+                           root=os.getcwd(), on_step=_on_step, embedder=embedder,
+                           architect_model=architect_provider(), history=history)
         print()
         print(f"{_c('1;32', 'Recalq')} › {answer}")
         print(_RULE)
@@ -1717,14 +1767,14 @@ if __name__ == "__main__":
     # Resumed from Redis (same namespace as cache/docs) rather than starting
     # blank each run — a follow-up like "do it" still means something even
     # in a brand-new `./recalq` process, as long as you're in the same project.
-    history = load_history(_cli_namespace)
+    history = load_history(_history_ns)
     if history:
         print(_c("2", f"  resumed previous conversation ({len(history)//2} exchanges) — /reset to start fresh"))
         print()
 
     def _persist_history():
         history[:] = history[-HISTORY_MAX_TURNS:]
-        save_history(history, _cli_namespace)
+        save_history(history, _history_ns)
     _PROJECT_TRIGGERS = ("analyze this project", "analyse this project", "analyze the project",
                          "explain this project", "explain this codebase", "explain this repo",
                          "what does this project do", "what is this project", "summarize this project",
@@ -1742,13 +1792,16 @@ if __name__ == "__main__":
             print(f"\n📊 queries={s['total_queries']} hits={s['cache_hits']} "
                   f"saved~{s['tokens_saved_est']} llm_calls={s['llm_calls']}\n")
             continue
+        if user_input == "/usage":
+            print("\n" + usage_report(_cli_user) + "\n")
+            continue
         if user_input == "/cache":
             for e in list_cache_entries(_cli_namespace)[:10]:
                 print(f"  [{e.get('hits',0)} hits] {e['query'][:70]}")
             continue
         if user_input == "/reset":
             history.clear()
-            clear_history(_cli_namespace)
+            clear_history(_history_ns)
             recent_doc_id = None
             _project_scanned = False
             print("  conversation and attached-doc context cleared\n")
@@ -1883,7 +1936,7 @@ if __name__ == "__main__":
                 continue
             with open(path, "rb") as f:
                 img_bytes = f.read()
-            result = ask_image(img_bytes, mime, question, namespace=_cli_namespace, user="cli")
+            result = ask_image(img_bytes, mime, question, namespace=_cli_namespace, user=_cli_user)
             print()
             print(_c("2", f"◆ vision · {result['source']}"))
             print(f"{_c('1;32', 'Recalq')} › {result['answer']}")
@@ -1941,7 +1994,7 @@ if __name__ == "__main__":
             print(_c("2", f"  🔍 {name} {preview}"))
         result = ask(_query, model, history=history, recent_doc_id=recent_doc_id,
                      has_attachments=bool(recent_doc_id), root=os.getcwd(), on_explore=_on_explore,
-                     namespace=_cli_namespace)
+                     namespace=_cli_namespace, user=_cli_user)
         result["answer"] = _plugin_api.run_after(_query, result["answer"])
         src = result["source"]
         if src == "cache":

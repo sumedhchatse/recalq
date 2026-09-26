@@ -104,3 +104,25 @@ def get_audit_summary(r, *, namespace=None, all_namespaces=False):
         "by_user":     by_user,
         "by_namespace": by_ns,
     }
+
+
+def usage_by_user(r, cost_per_1k):
+    """{user: {queries, cache_hits, llm_calls, tokens_used, tokens_saved,
+    cost_usd}} over the audit log. cost_per_1k is {provider_alias: $/1k
+    tokens} (client.yaml's cost_per_1k_tokens) — an entry whose source isn't
+    a known alias (cache, guardrails, raw litellm string) costs $0.
+    ponytail: covers only the last AUDIT_MAX entries; move to per-user Redis
+    counters if the team outgrows that window."""
+    out = {}
+    for e in get_audit_log(r, all_namespaces=True, limit=AUDIT_MAX):
+        u = out.setdefault(str(e.get("user", "unknown")), {
+            "queries": 0, "cache_hits": 0, "llm_calls": 0,
+            "tokens_used": 0, "tokens_saved": 0, "cost_usd": 0.0})
+        src = e.get("source")
+        u["queries"] += 1
+        u["cache_hits"] += src == "cache"
+        u["llm_calls"] += src not in ("cache", "guardrails", "-")
+        u["tokens_used"] += e.get("tokens_used") or 0
+        u["tokens_saved"] += e.get("tokens_saved") or 0
+        u["cost_usd"] += (e.get("tokens_used") or 0) * cost_per_1k.get(src, 0.0) / 1000
+    return out

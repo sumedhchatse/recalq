@@ -499,7 +499,7 @@ def _plan(task, history, architect_model, root, on_step, embedder):
 
 
 def run(task, model, root=".", confirm=None, on_step=None, embedder=None, architect_model=None,
-       history=None):
+       history=None, on_usage=None):
     """Full read/write/shell agent loop for an explicit task ('/agent ...'
     or an action-shaped auto-trigger). Returns the final text answer.
 
@@ -511,7 +511,9 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
     _plan() above) and seeds the edit pass with its plan — one extra LLM
     call, in exchange for much more reliable exploration on a hard/
     ambiguous task; leave it None (the default) to skip straight to editing
-    exactly as before. history, if given, is the conversation so far
+    exactly as before. on_usage(model_used, tokens), if given, is called
+    once at the end with the edit pass's totals (for audit/billing).
+    history, if given, is the conversation so far
     ([{"role","content"}, ...], already trimmed by the caller) — without
     it, a follow-up like "do it" has no idea what "it" refers to."""
     _undo.pop(os.path.realpath(root), None)  # /undo reverts the latest run only
@@ -542,7 +544,10 @@ def run(task, model, root=".", confirm=None, on_step=None, embedder=None, archit
         *(history or []),
         {"role": "user", "content": task},
     ]
-    answer_text, _, _, _ = _loop(messages, model, root, confirm, on_step, TOOLS, MAX_STEPS, 2000, embedder)
+    answer_text, model_used, tokens, _ = _loop(messages, model, root, confirm, on_step, TOOLS,
+                                               MAX_STEPS, 2000, embedder)
+    if on_usage:
+        on_usage(model_used, tokens)
     return answer_text
 
 

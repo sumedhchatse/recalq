@@ -115,6 +115,21 @@ steps and what's needed to finish it — Slack's docstring explains why it's
 a smaller task (Socket Mode, one new dependency) than Teams' (needs a
 public HTTPS endpoint + Azure Bot Service registration).
 
+### Team mode (one shared host)
+
+Put Recalq on one server; teammates SSH in, `cd` into a project and run
+`./recalq`. Everyone in the same project directory shares its cache and
+ingested docs (a question one person already paid for is free for the
+next); conversations stay per person. Identity is the OS login
+(`RECALQ_USER` overrides it) or the Telegram user id.
+
+- `/usage` — per-person queries, cache hits, tokens used/saved and cost
+  (from `cost_per_1k_tokens` in `client.yaml`). Admins see the whole team.
+- `RECALQ_ADMINS=alice,795445523` in `.env` — who counts as admin.
+- `/undo` — reverts the files the last `/agent` run changed.
+- A provider that fails is skipped for `PROVIDER_COOLDOWN` seconds (300)
+  and the next cheapest healthy one answers instead.
+
 ## 4. Status checks
 
 | What | Command |
