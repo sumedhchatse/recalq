@@ -88,6 +88,13 @@ cd ~/memlayer && source .venv/bin/activate
 Commands inside: `quit`, `stats`, `cache`, `providers`, `model <name>`,
 `doc <path>`, `image <path> [question]`. Anything else is a question.
 
+To use it from any project, put it on your PATH (no venv activation needed —
+the launcher finds `.venv` through the symlink):
+```
+ln -s ~/memlayer/recalq ~/.local/bin/recalq
+cd ~/some-project && recalq     # the current directory is the project
+```
+
 ### Telegram bot
 
 One-time setup — see the "Getting a bot token" section below, then:
