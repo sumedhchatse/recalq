@@ -478,14 +478,23 @@ def main():
         jobs = []
     if jobs:
         log.info(f"scheduled jobs: {', '.join(j['name'] for j in jobs)}")
+    failures = 0
     while True:
         scheduler.tick(jobs, memlayer, send, log)
         try:
             updates = _get_updates(timeout=30)
         except Exception as e:
-            log.error(f"getUpdates failed: {e} — retrying in 5s")
-            time.sleep(5)
+            # Back off 5s → 60s and log only the first failure and every 10th,
+            # so a network outage doesn't write an ERROR line every 5s for hours.
+            failures += 1
+            wait = min(5 * 2 ** (failures - 1), 60)
+            if failures == 1 or failures % 10 == 0:
+                log.error(f"getUpdates failed ({failures}x): {e} — retrying in {wait}s")
+            time.sleep(wait)
             continue
+        if failures:
+            log.info(f"getUpdates recovered after {failures} failures")
+            failures = 0
         for update in updates:
             if "message" in update:
                 try:
